@@ -2,8 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include <cooperative_groups.h>
 #include <cinttypes>
+#include <cooperative_groups.h>
 #include <cstdio>
 #include <cuda_runtime.h>
 
