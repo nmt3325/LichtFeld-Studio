@@ -24,7 +24,7 @@ namespace lfs::vis::input {
 
     namespace {
 
-        constexpr int PROFILE_VERSION = 10; // Version 10 routes polygon secondary click through key bindings.
+        constexpr int PROFILE_VERSION = 12; // Version 12 adds Shift+scroll as a second BRUSH_RESIZE trigger.
         constexpr std::array<ToolMode, 8> ALL_MODES = {
             ToolMode::GLOBAL,
             ToolMode::SELECTION,
@@ -417,8 +417,13 @@ namespace lfs::vis::input {
 
                 binding = normalizeLoadedBinding(std::move(binding));
 
+                // Dedup by trigger, not action: the same action can legitimately
+                // be bound to multiple triggers (e.g. BRUSH_RESIZE on both
+                // Ctrl+scroll and Shift+scroll). A trigger-based dedup keeps
+                // them both; an action-based one would silently drop the first.
                 if (auto existing = std::find_if(bindings_.begin(), bindings_.end(), [&](const Binding& current) {
-                        return current.mode == binding.mode && current.action == binding.action;
+                        return current.mode == binding.mode &&
+                               triggersOverlap(current.trigger, binding.trigger);
                     });
                     existing != bindings_.end()) {
                     *existing = binding;
@@ -464,20 +469,32 @@ namespace lfs::vis::input {
         const Profile defaults = createDefaultProfile();
         size_t added = 0;
         for (const auto& def : defaults.bindings) {
+            // Version 12 adds Shift+scroll as a *parallel* trigger for
+            // BRUSH_RESIZE — the existing Ctrl+scroll binding stays, so the
+            // usual "skip if the action is already mapped" guard doesn't
+            // apply here and we only need to ensure the Shift+scroll trigger
+            // itself is free.
+            const bool brush_resize_shift_scroll =
+                def.action == Action::BRUSH_RESIZE &&
+                std::holds_alternative<MouseScrollTrigger>(def.trigger) &&
+                std::get<MouseScrollTrigger>(def.trigger).modifiers == MODIFIER_SHIFT;
             const bool should_add =
                 (version < 6 && def.action == Action::CAMERA_ROLL) ||
-                (version < 7 && def.action == Action::BRUSH_RESIZE) ||
+                (version < 7 && def.action == Action::BRUSH_RESIZE && !brush_resize_shift_scroll) ||
                 (version < 9 && def.action == Action::CONFIRM_POLYGON) ||
-                (version < 10 && def.action == Action::UNDO_POLYGON_VERTEX);
+                (version < 10 && def.action == Action::UNDO_POLYGON_VERTEX) ||
+                (version < 12 && brush_resize_shift_scroll);
             if (!should_add) {
                 continue;
             }
-            const bool present = std::ranges::any_of(
-                bindings_, [&](const Binding& current) {
-                    return current.mode == def.mode && current.action == def.action;
-                });
-            if (present) {
-                continue;
+            if (!brush_resize_shift_scroll) {
+                const bool action_already_bound = std::ranges::any_of(
+                    bindings_, [&](const Binding& current) {
+                        return current.mode == def.mode && current.action == def.action;
+                    });
+                if (action_already_bound) {
+                    continue;
+                }
             }
             const bool trigger_in_use = std::ranges::any_of(
                 bindings_, [&](const Binding& current) {
@@ -1003,11 +1020,19 @@ namespace lfs::vis::input {
                                     Action::BRUSH_RESIZE,
                                     "Brush size"});
         profile.bindings.push_back({ToolMode::SELECTION,
+                                    MouseScrollTrigger{MODIFIER_SHIFT},
+                                    Action::BRUSH_RESIZE,
+                                    "Brush size"});
+        profile.bindings.push_back({ToolMode::SELECTION,
                                     KeyTrigger{KEY_C, MODIFIER_CTRL | MODIFIER_ALT},
                                     Action::TOGGLE_SELECTION_CROP_FILTER,
                                     "Crop filter"});
         profile.bindings.push_back({ToolMode::BRUSH,
                                     MouseScrollTrigger{MODIFIER_CTRL},
+                                    Action::BRUSH_RESIZE,
+                                    "Brush size"});
+        profile.bindings.push_back({ToolMode::BRUSH,
+                                    MouseScrollTrigger{MODIFIER_SHIFT},
                                     Action::BRUSH_RESIZE,
                                     "Brush size"});
         profile.bindings.push_back({ToolMode::BRUSH,

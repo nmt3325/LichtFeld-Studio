@@ -1343,8 +1343,11 @@ namespace lfs::vis {
             }
         }
 
-        // Brush radius adjustment for selection/brush tools
-        if (scroll_action == input::Action::BRUSH_RESIZE && !op::operators().hasModalOperator()) {
+        // Brush radius adjustment for selection/brush tools. Modal operators
+        // for selection strokes pass scroll through, so it's safe to honor
+        // BRUSH_RESIZE here even mid-stroke — that's what lets the user grow
+        // or shrink the ring while in the middle of an add or subtract drag.
+        if (scroll_action == input::Action::BRUSH_RESIZE) {
             if (selection_tool_ && selection_tool_->isEnabled()) {
                 const float scale = (yoff > 0) ? 1.1f : 0.9f;
                 selection_tool_->setBrushRadius(selection_tool_->getBrushRadius() * scale);
