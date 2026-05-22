@@ -1353,12 +1353,17 @@ namespace lfs::vis {
                         viewport_interaction_context_.scene_manager = scene_manager;
                         split_view_service_.updateInfo(FrameResources{});
 
-                        // VkSplat returns early before the shared mesh-frame setup
-                        // below. Republish it here so the viewport pass sees the
-                        // current camera and can depth-test meshes against the
-                        // GPU-native VkSplat depth image.
-                        if (!frame_ctx.scene_state.meshes.empty() ||
-                            environmentBackgroundEnabled(settings_)) {
+                        // VkSplat returns early before the shared mesh-frame
+                        // setup below. Republish here so the viewport pass sees
+                        // the current camera; also forwards the splat depth view
+                        // used by shape_overlay / textured_overlay for world-
+                        // space overlay depth fading, so publish whenever depth
+                        // is available even without meshes or environment bg.
+                        const bool publish_mesh_frame =
+                            !frame_ctx.scene_state.meshes.empty() ||
+                            environmentBackgroundEnabled(settings_) ||
+                            render_result->depth_image_view != VK_NULL_HANDLE;
+                        if (publish_mesh_frame) {
                             auto mesh_frame = populateMeshFrame(frame_ctx, settings_, pending_split_view);
                             populate_independent_split_mesh_panels(mesh_frame);
                             if (render_result->depth_image_view != VK_NULL_HANDLE) {
