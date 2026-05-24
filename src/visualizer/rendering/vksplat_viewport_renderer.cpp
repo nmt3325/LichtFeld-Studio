@@ -2587,90 +2587,112 @@ namespace lfs::vis {
         // buffer. Avoids ~3.7 ms/frame of destroy+create+import.
         (void)input_binding;
 
-        auto overlay_bindings = uploadSelectionOverlay(
-            context, request, static_cast<std::size_t>(splat_data.size()), ring_slot);
+        auto overlay_bindings = [&] {
+            LOG_TIMER("vksplat.render.uploadSelectionOverlay");
+            return uploadSelectionOverlay(
+                context, request, static_cast<std::size_t>(splat_data.size()), ring_slot);
+        }();
         if (!overlay_bindings) {
             return std::unexpected(overlay_bindings.error());
         }
-        if (auto ok = ensureOutputImages(context, size, output_slot); !ok) {
-            return std::unexpected(ok.error());
+        {
+            LOG_TIMER("vksplat.render.ensureOutputImages");
+            if (auto ok = ensureOutputImages(context, size, output_slot); !ok) {
+                return std::unexpected(ok.error());
+            }
         }
 
         VulkanGSRendererUniforms uniforms{};
-        populateVksplatCameraUniforms(uniforms,
-                                      request.frame_view,
-                                      request.scene,
-                                      active_sh_degree,
-                                      lfs::core::sh_float4_slots_for_rest(
-                                          static_cast<std::uint32_t>(splat_data.max_sh_coeffs_rest())),
-                                      buffers_.num_splats,
-                                      request.equirectangular,
-                                      request.gut);
-        uniforms.step = static_cast<std::uint32_t>(modelTransformCount(request.scene.model_transforms));
+        {
+            LOG_TIMER("vksplat.render.populateUniforms");
+            populateVksplatCameraUniforms(uniforms,
+                                          request.frame_view,
+                                          request.scene,
+                                          active_sh_degree,
+                                          lfs::core::sh_float4_slots_for_rest(
+                                              static_cast<std::uint32_t>(splat_data.max_sh_coeffs_rest())),
+                                          buffers_.num_splats,
+                                          request.equirectangular,
+                                          request.gut);
+            uniforms.step = static_cast<std::uint32_t>(modelTransformCount(request.scene.model_transforms));
+        }
 
         if (input_binding->uses_temporary_upload_slot && !request.gut) {
+            LOG_TIMER("vksplat.render.aliasSortScratch");
             aliasSortScratchToInputSlot(ring_slot);
         }
 
         std::expected<void, std::string> compose_status;
         try {
+            // Timer/guard ordering trick: the LOG_TIMER for batch_total is
+            // declared FIRST so it destructs LAST. The DeviceGuard `batch`
+            // destructs first at try-block exit, triggering endCommandBatch()
+            // (the fence wait). batch_total therefore measures
+            // record + composePixelState + endCommandBatch fence wait.
+            LOG_TIMER("vksplat.render.batch_total");
             auto batch = DeviceGuard(&renderer_);
-            renderer_.executeProjectionForward(uniforms,
-                                               buffers_,
-                                               overlay_bindings->transform_indices,
-                                               overlay_bindings->node_mask,
-                                               overlay_bindings->overlay_params,
-                                               overlay_bindings->model_transforms,
-                                               0,
-                                               request.gut);
-            // Two-stage sort (Splatshop, matches gsplat_fwd reference):
-            //   1. Depth-sort N primitives by radial distance (full 32-bit key).
-            //   2. Reorder tiles_touched into depth-rank order so the cumsum
-            //      offsets match a depth-ordered emission walk.
-            //   3. Stable-sort tile instances by tile id only (no depth bits
-            //      packed in), which preserves depth order within each tile.
-            renderer_.executeSortPrimitivesByDepth(uniforms, buffers_);
-            renderer_.executeApplyDepthOrdering(uniforms, buffers_);
-            renderer_.executeCalculateIndexBufferOffset(uniforms, buffers_);
-            uniforms.sort_capacity = static_cast<uint32_t>(
-                std::min<std::size_t>(buffers_.num_indices,
-                                      static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())));
-            if (buffers_.num_indices > 0) {
-                renderer_.executeGenerateKeys(uniforms, buffers_);
-                // Stage-2 sort bits: ceil(log2(grid_w*grid_h + 1)) rounded up to
-                // the next byte. Real tile ids fit in this range; the sentinel
-                // (grid_w*grid_h) sorts to the end.
-                int tile_bits = 0;
-                uint32_t tile_max = uniforms.grid_width * uniforms.grid_height;
-                while (tile_max) {
-                    tile_max >>= 1;
-                    ++tile_bits;
+            {
+                LOG_TIMER("vksplat.render.record");
+                renderer_.executeProjectionForward(uniforms,
+                                                   buffers_,
+                                                   overlay_bindings->transform_indices,
+                                                   overlay_bindings->node_mask,
+                                                   overlay_bindings->overlay_params,
+                                                   overlay_bindings->model_transforms,
+                                                   0,
+                                                   request.gut);
+                // Two-stage sort (Splatshop, matches gsplat_fwd reference):
+                //   1. Depth-sort N primitives by radial distance (full 32-bit key).
+                //   2. Reorder tiles_touched into depth-rank order so the cumsum
+                //      offsets match a depth-ordered emission walk.
+                //   3. Stable-sort tile instances by tile id only (no depth bits
+                //      packed in), which preserves depth order within each tile.
+                renderer_.executeSortPrimitivesByDepth(uniforms, buffers_);
+                renderer_.executeApplyDepthOrdering(uniforms, buffers_);
+                renderer_.executeCalculateIndexBufferOffset(uniforms, buffers_);
+                uniforms.sort_capacity = static_cast<uint32_t>(
+                    std::min<std::size_t>(buffers_.num_indices,
+                                          static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())));
+                if (buffers_.num_indices > 0) {
+                    renderer_.executeGenerateKeys(uniforms, buffers_);
+                    // Stage-2 sort bits: ceil(log2(grid_w*grid_h + 1)) rounded up to
+                    // the next byte. Real tile ids fit in this range; the sentinel
+                    // (grid_w*grid_h) sorts to the end.
+                    int tile_bits = 0;
+                    uint32_t tile_max = uniforms.grid_width * uniforms.grid_height;
+                    while (tile_max) {
+                        tile_max >>= 1;
+                        ++tile_bits;
+                    }
+                    renderer_.executeSort(uniforms, buffers_, tile_bits);
+                    renderer_.executeComputeTileRanges(uniforms, buffers_);
+                    renderer_.executeRasterizeForward(uniforms,
+                                                      buffers_,
+                                                      overlay_bindings->selection_mask,
+                                                      overlay_bindings->preview_mask,
+                                                      overlay_bindings->selection_colors,
+                                                      buffers_.overlay_flags.deviceBuffer,
+                                                      overlay_bindings->overlay_params,
+                                                      overlay_bindings->transform_indices,
+                                                      overlay_bindings->model_transforms,
+                                                      request.gut);
                 }
-                renderer_.executeSort(uniforms, buffers_, tile_bits);
-                renderer_.executeComputeTileRanges(uniforms, buffers_);
-                renderer_.executeRasterizeForward(uniforms,
-                                                  buffers_,
-                                                  overlay_bindings->selection_mask,
-                                                  overlay_bindings->preview_mask,
-                                                  overlay_bindings->selection_colors,
-                                                  buffers_.overlay_flags.deviceBuffer,
-                                                  overlay_bindings->overlay_params,
-                                                  overlay_bindings->transform_indices,
-                                                  overlay_bindings->model_transforms,
-                                                  request.gut);
+                // Record compose into the rasterizer's batch so the entire frame
+                // submits and waits exactly once instead of fence-blocking twice.
+                compose_status = composePixelState(
+                    context,
+                    renderer_.activeCommandBuffer(),
+                    uniforms,
+                    request.frame_view.background_color,
+                    output_slot,
+                    request.transparent_background,
+                    request.depth_view,
+                    request.depth_view_min,
+                    request.depth_view_max);
             }
-            // Record compose into the rasterizer's batch so the entire frame
-            // submits and waits exactly once instead of fence-blocking twice.
-            compose_status = composePixelState(
-                context,
-                renderer_.activeCommandBuffer(),
-                uniforms,
-                request.frame_view.background_color,
-                output_slot,
-                request.transparent_background,
-                request.depth_view,
-                request.depth_view_min,
-                request.depth_view_max);
+            // record/composePixelState timer scope ends here.
+            // On try-block exit: `batch` destructs (endCommandBatch fence wait),
+            // then batch_total timer logs.
         } catch (const std::exception& e) {
             return std::unexpected(std::format("VkSplat forward pass failed: {}", e.what()));
         }
