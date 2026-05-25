@@ -1819,7 +1819,7 @@ class TrainingPanel(Panel):
             lf.save_checkpoint()
             self._checkpoint_saved_time = time.time()
         elif action == "browse_bg":
-            selected = lf.ui.open_image_file_dialog("")
+            selected = lf.ui.open_image_dialog("")
             if selected:
                 params = lf.optimization_params()
                 if params and params.has_params():
@@ -2500,7 +2500,7 @@ class TrainingPanel(Panel):
                 if layout.button(
                     tr("training_params.bg_image_browse") + "##py_bg_browse"
                 ):
-                    selected = lf.ui.open_image_file_dialog("")
+                    selected = lf.ui.open_image_dialog("")
                     if selected:
                         params.bg_image_path = selected
                 layout.same_line()
