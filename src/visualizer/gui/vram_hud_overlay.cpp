@@ -248,6 +248,9 @@ namespace lfs::vis::gui {
             if (scope.rfind("vulkan.", 0) == 0) {
                 return firstDotSegments(scope, 3);
             }
+            if (scope == "shared.scratch" && !label.empty()) {
+                return "shared.scratch." + std::string(label);
+            }
             if (scope.rfind("train.", 0) == 0 || scope.find("/train.") != std::string_view::npos) {
                 return firstScopeSegments(lastTrainScopeComponent(scope), 2);
             }

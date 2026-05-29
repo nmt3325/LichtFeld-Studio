@@ -1396,9 +1396,9 @@ namespace lfs::vis {
                                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                              VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 
+        // The per-region rows are published by bindSharedScratchBuffers (the single
+        // source of truth for the breakdown); here we only refresh the capacity gauge.
         const auto publish_capacity = [this]() {
-            lfs::diagnostics::VramProfiler::instance().recordCurrentBytes(
-                "shared.scratch", "cuda_vulkan_arena", shared_scratch_.bytes);
             lfs::diagnostics::VramProfiler::instance().setGauge(
                 "vram.audit.shared_scratch.capacity", static_cast<double>(shared_scratch_.bytes));
         };
@@ -1583,8 +1583,6 @@ namespace lfs::vis {
         shared_scratch_.imported_buffer = reimported;
         shared_scratch_.bytes = shared_scratch_.block->size;
         ++shared_scratch_.generation;
-        lfs::diagnostics::VramProfiler::instance().recordCurrentBytes(
-            "shared.scratch", "cuda_vulkan_arena", shared_scratch_.bytes);
         lfs::diagnostics::VramProfiler::instance().setGauge(
             "vram.audit.shared_scratch.capacity", static_cast<double>(shared_scratch_.bytes));
         LOG_INFO("VkSplat shared scratch re-imported after in-place grow: {} MiB", shared_scratch_.bytes >> 20);
@@ -1632,24 +1630,42 @@ namespace lfs::vis {
         bind_count(buffers_.visible_count, 1);
         bind_count(buffers_.visible_sort_dispatch_args, 3);
         bind_count(buffers_.index_buffer_offset, num_splats);
+        const std::size_t per_splat_end = cursor;
         bind_count(buffers_.sorting_keys_1, sort_capacity);
         bind_count(buffers_.sorting_keys_2, sort_capacity);
         bind_count(buffers_.sorting_gauss_idx_1, sort_capacity);
         bind_count(buffers_.sorting_gauss_idx_2, sort_capacity);
+        const std::size_t sort_end = cursor;
         bind_count(buffers_.tile_sort_count, 1);
         bind_count(buffers_.tile_sort_dispatch_args, 3);
         bind_count(buffers_.tile_ranges, num_tiles + 1);
+        const std::size_t tiles_end = cursor;
         bind_count(buffers_.pixel_state, 4 * num_pixels);
         bind_count(buffers_.pixel_depth, num_pixels);
         bind_count(buffers_.n_contributors, num_pixels);
+        const std::size_t pixel_end = cursor;
         bind_count(buffers_._cumsum_blockSums, _CEIL_DIV(num_splats, std::size_t{1024}));
         bind_count(buffers_._cumsum_blockSums2, _CEIL_DIV(_CEIL_DIV(num_splats, std::size_t{1024}), std::size_t{1024}));
         bind_count(buffers_._sorting_histogram, 8 * 256);
         bind_count(buffers_._sorting_histogram_cumsum,
                    _CEIL_DIV(sort_capacity, std::size_t{512 * 8}) * 256);
 
-        lfs::diagnostics::VramProfiler::instance().setGauge(
-            "vram.audit.shared_scratch.vksplat_view_bytes", static_cast<double>(cursor));
+        // Attribute the committed arena exactly: each region's span comes straight from
+        // the bind cursor, and reserve_unbound is the committed-but-unbound remainder.
+        // Their sum equals shared_scratch_.bytes (the real committed VMM footprint), so
+        // the HUD breaks the single "shared" row into its true components with no estimate.
+        auto& profiler = lfs::diagnostics::VramProfiler::instance();
+        const auto record_region = [&](const char* region, const std::size_t bytes) {
+            profiler.recordCurrentBytes("shared.scratch", region, bytes);
+        };
+        record_region("per_splat", per_splat_end);
+        record_region("sort_buffers", sort_end - per_splat_end);
+        record_region("tiles", tiles_end - sort_end);
+        record_region("pixel", pixel_end - tiles_end);
+        record_region("scan", cursor - pixel_end);
+        record_region("reserve_unbound",
+                      shared_scratch_.bytes > cursor ? shared_scratch_.bytes - cursor : 0);
+        profiler.setGauge("vram.audit.shared_scratch.vksplat_view_bytes", static_cast<double>(cursor));
     }
 
     void VksplatViewportRenderer::releasePrivateScratchBuffers() {
@@ -1763,8 +1779,7 @@ namespace lfs::vis {
             context_->destroyExternalBuffer(shared_scratch_.imported_buffer);
         }
         if (shared_scratch_.bytes != 0) {
-            lfs::diagnostics::VramProfiler::instance().recordCurrentBytes(
-                "shared.scratch", "cuda_vulkan_arena", 0);
+            lfs::diagnostics::VramProfiler::instance().clearScope("shared.scratch");
             lfs::diagnostics::VramProfiler::instance().setGauge("vram.audit.shared_scratch.capacity", 0.0);
             lfs::diagnostics::VramProfiler::instance().setGauge("vram.audit.shared_scratch.vksplat_view_bytes", 0.0);
         }
@@ -4158,21 +4173,16 @@ namespace lfs::vis {
                        ? buffers_.num_splats
                        : buffers_.num_splats * 4u)
                 : 0u;
-        // The measured tile-instance count lags one frame behind the true count:
-        // while the viewport is being maximized the tile grid can nearly double in
-        // a single frame (and densification grows the splat count concurrently), so
-        // sizing the shared sort buffers to the exact prior high-water makes every
-        // frame bail as "sort capacity insufficient" and resubmit a doomed partial
-        // batch. Headroom that absorbs a full doubling lets the capacity converge in
-        // one step; it collapses back toward the exact high-water once growth
-        // settles (the headroom is only a few MiB of sort scratch).
-        const std::size_t shared_sort_capacity_base =
+        // Size the sort buffers to the exact measured peak: num_indices_high_water is
+        // the running max tile-instance count, so this is exactly what every frame seen
+        // so far needed. A genuine new peak (viewport maximize or a densification burst
+        // pushing the count beyond all history) renders one frame clamped to the prior
+        // peak, then the next frame grows the block in place (ensureSharedScratchArena).
+        // The former unconditional *2 cost ~100 MiB of permanently-committed sort scratch
+        // at 5M splats; a rare one-frame regrow during transients is the better trade.
+        const std::size_t shared_sort_capacity =
             std::max({buffers_.num_indices, buffers_.num_splats,
                       buffers_.num_indices_high_water, first_frame_estimate});
-        const std::size_t shared_sort_capacity =
-            shared_sort_capacity_base > (std::numeric_limits<std::size_t>::max() / 2u)
-                ? shared_sort_capacity_base
-                : shared_sort_capacity_base * 2u;
         const std::size_t num_pixels =
             static_cast<std::size_t>(uniforms.image_width) * static_cast<std::size_t>(uniforms.image_height);
         const std::size_t num_tiles =
