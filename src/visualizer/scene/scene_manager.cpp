@@ -34,6 +34,7 @@
 #include "visualizer/gui_capabilities.hpp"
 #include "visualizer/rendering/model_renderability.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
+#include "visualizer/visualizer_impl.hpp"
 #include "window/vulkan_context.hpp"
 #include "window/window_manager.hpp"
 #include <algorithm>
@@ -72,6 +73,26 @@ namespace lfs::vis {
             op::undoHistory().push(
                 std::make_unique<op::SceneGraphPatchEntry>(scene_manager, std::move(label),
                                                            std::move(before), std::move(after)));
+        }
+
+        void retireSplatModelAsync(std::shared_ptr<const core::SplatData> model) {
+            if (!model) {
+                return;
+            }
+            std::thread([retired = std::move(model)]() mutable {
+                retired.reset();
+                core::Tensor::trim_memory_pool();
+            }).detach();
+        }
+
+        void retireSplatModelsAsync(std::vector<std::unique_ptr<core::SplatData>> models) {
+            if (models.empty()) {
+                return;
+            }
+            std::thread([retired = std::move(models)]() mutable {
+                retired.clear();
+                core::Tensor::trim_memory_pool();
+            }).detach();
         }
 
         [[nodiscard]] std::vector<const core::SceneNode*> effectiveVisibleSplatNodes(const core::Scene& scene) {
@@ -813,6 +834,79 @@ namespace lfs::vis {
         return scene_.consolidateNodeModels();
     }
 
+    void SceneManager::scheduleConsolidatedCompaction() {
+        auto snapshot = scene_.captureConsolidatedCompaction();
+        if (!snapshot) {
+            return;
+        }
+
+        {
+            std::lock_guard lock(consolidated_compaction_mutex_);
+            if (consolidated_compaction_running_) {
+                consolidated_compaction_pending_ = true;
+                return;
+            }
+            consolidated_compaction_running_ = true;
+            consolidated_compaction_pending_ = false;
+        }
+
+        auto* viewer = services().guiOrNull() ? services().guiOrNull()->getViewer() : nullptr;
+        consolidated_compaction_thread_ = std::jthread(
+            [this, viewer, snapshot = std::move(*snapshot)](std::stop_token stop_token) mutable {
+                std::vector<core::Scene::ConsolidatedNodeSlot> compacted_slots;
+                auto compacted_model = core::Scene::compactConsolidatedSnapshot(snapshot, compacted_slots);
+                if (stop_token.stop_requested()) {
+                    return;
+                }
+
+                auto publish = [this,
+                                generation = snapshot.generation,
+                                old_model = snapshot.model,
+                                compacted_model = std::move(compacted_model),
+                                compacted_slots = std::move(compacted_slots)]() mutable {
+                    if (auto* rendering = services().renderingOrNull()) {
+                        rendering->releaseSceneModelResources();
+                    }
+
+                    const bool installed = scene_.installConsolidatedCompaction(
+                        compacted_model,
+                        std::move(compacted_slots),
+                        generation);
+                    if (installed) {
+                        scene_.notifyMutation(core::Scene::MutationType::MODEL_CHANGED);
+                        if (auto* rendering = services().renderingOrNull()) {
+                            rendering->markDirty(DirtyFlag::SPLATS | DirtyFlag::MESH | DirtyFlag::OVERLAY);
+                        }
+                    }
+
+                    bool rerun = !installed;
+                    {
+                        std::lock_guard lock(consolidated_compaction_mutex_);
+                        consolidated_compaction_running_ = false;
+                        rerun = rerun || consolidated_compaction_pending_;
+                        consolidated_compaction_pending_ = false;
+                    }
+                    if (rerun) {
+                        if (!installed && compacted_model) {
+                            retireSplatModelAsync(std::move(compacted_model));
+                        }
+                        retireSplatModelAsync(std::move(old_model));
+                        scheduleConsolidatedCompaction();
+                    } else {
+                        retireSplatModelAsync(std::move(old_model));
+                    }
+                };
+
+                if (viewer && viewer->postWork(Visualizer::WorkItem{.run = std::move(publish), .cancel = {}})) {
+                    return;
+                }
+
+                std::lock_guard lock(consolidated_compaction_mutex_);
+                consolidated_compaction_running_ = false;
+                consolidated_compaction_pending_ = true;
+            });
+    }
+
     void SceneManager::resetToEmptyState(const bool trainer_already_cleared) {
         if (!trainer_already_cleared) {
             if (auto* trainer = services().trainerOrNull()) {
@@ -938,7 +1032,13 @@ namespace lfs::vis {
             names_to_remove.push_back(name);
         }
 
+        if (auto* rendering = services().renderingOrNull()) {
+            rendering->releaseSceneModelResources();
+        }
+
+        auto detached_models = scene_.detachSplatModelsForRemoval(name, keep_children);
         scene_.removeNode(name, keep_children);
+        scheduleConsolidatedCompaction();
         {
             std::lock_guard lock(state_mutex_);
             for (const auto& node_name : names_to_remove) {
@@ -965,6 +1065,7 @@ namespace lfs::vis {
         pushSceneGraphHistoryEntry(*this, "Delete Node", std::move(history_before),
                                    keep_children ? promoted_children : std::vector<std::string>{},
                                    history_options);
+        retireSplatModelsAsync(std::move(detached_models));
     }
 
     void SceneManager::setPLYVisibility(const std::string& name, const bool visible) {

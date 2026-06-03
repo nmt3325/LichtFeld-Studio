@@ -138,6 +138,7 @@ namespace lfs::vis {
             bool force_input_upload);
 
         void releasePreviewResources();
+        void releaseSceneResources();
         void reset();
 
     private:

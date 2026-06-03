@@ -1141,6 +1141,55 @@ namespace lfs::vis {
         logVramBreakdownIfChanged("preview_release");
     }
 
+    void VksplatViewportRenderer::releaseSceneResources() {
+        std::lock_guard<std::mutex> readback_lock(readback_mutex_);
+        if (!context_) {
+            return;
+        }
+
+        bool safe_to_release = true;
+        try {
+            renderer_.waitForPendingBatch();
+        } catch (const std::exception& e) {
+            LOG_WARN("VkSplat scene resource release falling back to device idle: {}", e.what());
+            safe_to_release = false;
+        }
+        if (safe_to_release && !context_->waitForSubmittedFrames()) {
+            LOG_WARN("VkSplat scene resource release falling back to device idle: {}",
+                     context_->lastError());
+            safe_to_release = false;
+        }
+        if (!safe_to_release && !context_->deviceWaitIdle()) {
+            LOG_WARN("VkSplat scene resource release failed to idle device: {}", context_->lastError());
+            return;
+        }
+
+        detachManagedBuffers();
+        for (std::size_t ring_slot = 0; ring_slot < kInputRingSize; ++ring_slot) {
+            releaseInputSlot(*context_, ring_slot);
+            releaseOpacityCopySlot(*context_, ring_slot);
+            auto& overlay = cuda_overlays_[ring_slot];
+            overlay.interop.reset();
+            context_->destroyExternalBuffer(overlay.buffer);
+            overlay = {};
+        }
+        cuda_selection_query_.interop.reset();
+        context_->destroyExternalBuffer(cuda_selection_query_.buffer);
+        cuda_selection_query_ = {};
+        for (auto& snap : ring_uploaded_) {
+            snap = {};
+        }
+        buffers_.num_splats = 0;
+        buffers_.num_indices = 0;
+        buffers_.is_unsorted_1 = true;
+        current_input_sh_degree_ = -1;
+
+        releasePrivateScratchBuffers();
+        releaseSharedScratchArena();
+        drainRetiredScratchBuffers(false);
+        logVramBreakdownIfChanged("scene_release");
+    }
+
     void VksplatViewportRenderer::reset() {
         std::lock_guard<std::mutex> readback_lock(readback_mutex_);
         if (context_ && context_->device() != VK_NULL_HANDLE) {

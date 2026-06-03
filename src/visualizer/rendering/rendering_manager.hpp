@@ -509,6 +509,8 @@ namespace lfs::vis {
         void queueCameraMetricsRefreshIfStale(SceneManager* scene_manager);
         void invalidateCameraMetricsRequests(bool clear_latest = false);
         void cameraMetricsWorkerLoop(std::stop_token stop_token);
+        void releaseSceneModelResources();
+        void releaseSceneRenderResources();
         void setupEventHandlers();
         void handleToggleSplitView();
         void handleToggleIndependentSplitView(const lfs::core::events::cmd::ToggleIndependentSplitView& event);
@@ -593,6 +595,7 @@ namespace lfs::vis {
         ViewportOverlayService viewport_overlay_service_;
 
         friend class RenderingManagerEventsTest_SceneClearedResetsFrustumLoaderSyncCache_Test;
+        friend class SceneManager;
     };
 
 } // namespace lfs::vis

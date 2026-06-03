@@ -22,6 +22,7 @@
 #include <glm/vec2.hpp>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 namespace lfs::vis {
 
@@ -301,6 +302,7 @@ namespace lfs::vis {
         void handleResetEllipsoid();
         void updateCropBoxToFitScene(bool use_percentile);
         void updateEllipsoidToFitScene(bool use_percentile);
+        void scheduleConsolidatedCompaction();
 
         core::Scene scene_;
         // Lock ordering: state_mutex_ before selection_.mutex() when both needed
@@ -347,6 +349,10 @@ namespace lfs::vis {
         std::unique_ptr<SelectionService> selection_service_;
         std::unique_ptr<op::SceneSnapshot> selection_preview_snapshot_;
         std::optional<core::Scene::SelectionStateSnapshot> selection_preview_before_;
+        std::mutex consolidated_compaction_mutex_;
+        std::jthread consolidated_compaction_thread_;
+        bool consolidated_compaction_running_ = false;
+        bool consolidated_compaction_pending_ = false;
     };
 
 } // namespace lfs::vis

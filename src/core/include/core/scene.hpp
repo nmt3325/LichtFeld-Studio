@@ -185,6 +185,9 @@ namespace lfs::core {
 
         void addNode(const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         void removeNode(const std::string& name, bool keep_children = false);
+        [[nodiscard]] std::vector<std::unique_ptr<lfs::core::SplatData>> detachSplatModelsForRemoval(
+            const std::string& name,
+            bool keep_children = false);
         void replaceNodeModel(const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         // Swap a node's model in place, returning the previous model so the caller can
         // recycle its (e.g. Vulkan-external) backing storage. Cheap: no disk/parse/upload,
@@ -264,6 +267,26 @@ namespace lfs::core {
         size_t consolidateNodeModels();
         [[nodiscard]] bool isConsolidated() const { return consolidated_; }
         [[nodiscard]] std::vector<bool> getNodeVisibilityMask() const;
+
+        struct ConsolidatedNodeSlot {
+            NodeId id = NULL_NODE;
+            size_t gaussian_count = 0;
+        };
+
+        struct ConsolidatedCompactionSnapshot {
+            std::shared_ptr<const lfs::core::SplatData> model;
+            std::vector<ConsolidatedNodeSlot> slots;
+            uint64_t generation = 0;
+            SplatTensorAllocator allocator;
+        };
+
+        [[nodiscard]] std::optional<ConsolidatedCompactionSnapshot> captureConsolidatedCompaction() const;
+        [[nodiscard]] static std::shared_ptr<lfs::core::SplatData> compactConsolidatedSnapshot(
+            const ConsolidatedCompactionSnapshot& snapshot,
+            std::vector<ConsolidatedNodeSlot>& compacted_slots);
+        [[nodiscard]] bool installConsolidatedCompaction(const std::shared_ptr<lfs::core::SplatData>& model,
+                                                         std::vector<ConsolidatedNodeSlot> slots,
+                                                         uint64_t generation);
 
         struct VisibleSplatNodeSlot {
             const SceneNode* node = nullptr;
@@ -407,8 +430,10 @@ namespace lfs::core {
         uint32_t pending_mutations_ = 0;
         int transaction_depth_ = 0;
         void flushMutations();
+        void removeConsolidatedNodeData(NodeId id);
+        void rebuildConsolidatedTransformIndices() const;
         mutable std::atomic<int> export_pin_count_{0};
-        mutable std::unique_ptr<lfs::core::SplatData> cached_combined_;
+        mutable std::shared_ptr<lfs::core::SplatData> cached_combined_;
         mutable std::shared_ptr<lfs::core::Tensor> cached_transform_indices_;
         mutable std::shared_ptr<lfs::core::Tensor> cached_visible_selection_indices_;
         mutable std::atomic<bool> model_cache_valid_{false};
@@ -420,7 +445,8 @@ namespace lfs::core {
         mutable std::vector<glm::mat4> cached_transforms_;
         mutable std::atomic<bool> transform_cache_valid_{false};
         mutable bool consolidated_ = false;
-        mutable std::vector<NodeId> consolidated_node_ids_;
+        mutable std::vector<ConsolidatedNodeSlot> consolidated_node_slots_;
+        mutable uint64_t consolidated_generation_ = 0;
 
         mutable std::shared_mutex selection_mutex_;
         mutable std::shared_ptr<lfs::core::Tensor> selection_mask_;
