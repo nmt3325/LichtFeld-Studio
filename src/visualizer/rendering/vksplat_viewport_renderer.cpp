@@ -3577,10 +3577,6 @@ namespace lfs::vis {
             return -1.0f;
         }
 
-        if (!context.waitForSubmittedFrames()) {
-            return std::unexpected(context.lastError());
-        }
-
         const VkDevice device = context.device();
         constexpr VkDeviceSize byte_count = sizeof(float);
         ScopedStagingBuffer staging{};

@@ -938,7 +938,10 @@ namespace lfs::python {
                     }
                     try {
                         PyEvent py_event = convert_modal_event(event);
+                        const auto redraw_generation_before = lfs::python::redraw_request_generation();
                         nb::object result = instance.attr("modal")(nb::none(), py_event);
+                        if (lfs::python::redraw_request_generation() != redraw_generation_before)
+                            lfs::python::request_pre_scene_panel_sync();
                         const auto status = parse_operator_result(result, instance);
                         if (has_undo && status == vis::op::OperatorResult::FINISHED) {
                             push_python_operator_undo_entry(label.empty() ? class_id : label, instance);

@@ -1366,6 +1366,9 @@ namespace lfs::vis {
         }
 
         if (!viewport_export_locked) {
+            if (frame_demand.python_redraw && gui_manager_)
+                gui_manager_->syncVisiblePanelsBeforeSceneRender();
+
             const auto vulkan_frame = rendering_manager_->renderVulkanFrame(context);
             if (gui_manager_) {
                 if (vulkan_frame.external_image != VK_NULL_HANDLE) {

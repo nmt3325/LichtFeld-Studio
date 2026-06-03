@@ -6610,6 +6610,102 @@ namespace lfs::vis::gui {
                 now >= next_vram_hud_publish_);
     }
 
+    void GuiManager::syncVisiblePanelsBeforeSceneRender() {
+        const std::uint64_t sync_generation = lfs::python::pre_scene_panel_sync_generation();
+        if (sync_generation == 0 ||
+            sync_generation == last_pre_scene_panel_sync_generation_)
+            return;
+        last_pre_scene_panel_sync_generation_ = sync_generation;
+
+        if (!viewer_ || !show_main_panel_ || ui_hidden_) {
+            return;
+        }
+
+        auto& reg = PanelRegistry::instance();
+        const auto main_tabs = reg.get_panels_for_space(PanelSpace::MainPanelTab);
+        if (main_tabs.empty()) {
+            return;
+        }
+
+        panel_layout_.syncActiveTab(main_tabs, focus_panel_name_);
+        const std::string& active_tab = panel_layout_.getActiveTab();
+        if (active_tab.empty()) {
+            return;
+        }
+
+        const ImGuiViewport* const mvp = ImGui::GetMainViewport();
+        if (!mvp || mvp->WorkSize.x <= 0.0f || mvp->WorkSize.y <= 0.0f) {
+            return;
+        }
+
+        auto& editor_ctx = viewer_->getEditorContext();
+        auto* scene_manager = viewer_->getSceneManager();
+        auto* trainer_manager = viewer_->getTrainerManager();
+        editor_ctx.update(scene_manager, trainer_manager);
+
+        UIContext ctx{
+            .viewer = viewer_,
+            .window_states = &window_states_,
+            .editor = &editor_ctx,
+            .sequencer_controller = &sequencer_ui_.controller(),
+            .rml_manager = &rmlui_manager_,
+            .fonts = buildFontSet()};
+
+        lfs::core::Scene* scene = nullptr;
+        if (scene_manager)
+            scene = &scene_manager->getScene();
+
+        PanelDrawContext draw_ctx;
+        draw_ctx.ui = &ctx;
+        draw_ctx.viewport = &viewport_layout_;
+        draw_ctx.scene = scene;
+        draw_ctx.ui_hidden = ui_hidden_;
+        draw_ctx.scene_generation = python::get_scene_generation();
+        if (scene_manager)
+            draw_ctx.has_selection = scene_manager->hasSelectedNode();
+        if (auto* cc = lfs::event::command_center())
+            draw_ctx.is_training = cc->snapshot().is_running;
+
+        PanelInputState input;
+        input.mouse_x = -1.0e9f;
+        input.mouse_y = -1.0e9f;
+        input.screen_x = mvp->Pos.x;
+        input.screen_y = mvp->Pos.y;
+        input.screen_w = static_cast<int>(mvp->Size.x);
+        input.screen_h = static_cast<int>(mvp->Size.y);
+
+        const float dpi = lfs::python::get_shared_dpi_scale();
+        const float panel_h = mvp->WorkSize.y - PanelLayoutManager::STATUS_BAR_HEIGHT * dpi;
+        if (panel_h <= 0.0f) {
+            return;
+        }
+
+        constexpr float kPanelPad = 8.0f;
+        constexpr float kPreloadMaxHeight = 100000.0f;
+        const float content_w = panel_layout_.getRightPanelWidth() - 2.0f * kPanelPad;
+        if (content_w <= 0.0f) {
+            return;
+        }
+
+        const float splitter_h = PanelLayoutManager::SPLITTER_H * dpi;
+        const float tab_bar_h = PanelLayoutManager::TAB_BAR_H * dpi;
+        const float avail_h = panel_h - 2.0f * kPanelPad;
+        const float scene_h =
+            std::max(80.0f * dpi,
+                     avail_h * panel_layout_.getScenePanelRatio() - splitter_h * 0.5f);
+        const float content_top = mvp->WorkPos.y + kPanelPad;
+        const float tab_content_y = content_top + scene_h + splitter_h + tab_bar_h;
+        const float tab_content_h =
+            std::max(0.0f, content_top + avail_h - tab_content_y);
+        const float clip_y_min = tab_content_y;
+        const float clip_y_max = tab_content_y + tab_content_h;
+
+        reg.preload_single_panel_direct(active_tab, content_w, kPreloadMaxHeight, draw_ctx,
+                                        clip_y_min, clip_y_max, &input);
+        reg.preload_child_panels_direct(active_tab, content_w, kPreloadMaxHeight, draw_ctx,
+                                        clip_y_min, clip_y_max, &input);
+    }
+
     bool GuiManager::needsAnimationFrame() const {
         if (isViewportExportLocked())
             return true;
