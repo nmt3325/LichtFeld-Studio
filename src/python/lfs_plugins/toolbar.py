@@ -105,6 +105,18 @@ def _keymap_shortcut(action_id, fallback=""):
     return fallback or ""
 
 
+def _panel_enabled(panel_id):
+    try:
+        import lichtfeld as lf
+
+        getter = getattr(getattr(lf, "ui", None), "is_panel_enabled", None)
+        if callable(getter):
+            return bool(getter(panel_id))
+    except Exception:
+        pass
+    return False
+
+
 def _button_record(button_id, action, value, icon_src, *,
                    tooltip_key="", tooltip_text="", action_id="",
                    shortcut_text="", selected=False, enabled=True):
@@ -629,7 +641,7 @@ class _UtilityToolbarController:
                 _icon_src("archive"),
                 tooltip_key="toolbar.asset_manager",
                 tooltip_text="Asset Manager",
-                selected=lf.ui.is_panel_enabled(self._ASSET_MANAGER_PANEL_ID),
+                selected=_panel_enabled(self._ASSET_MANAGER_PANEL_ID),
             )
         ]
         utility_bottom_buttons = []
@@ -747,7 +759,7 @@ class _UtilityToolbarController:
                     _icon_src("histogram.png"),
                     tooltip_key="toolbar.histogram",
                     tooltip_text="Histogram",
-                    selected=lf.ui.is_panel_enabled("lfs.histogram"),
+                    selected=_panel_enabled("lfs.histogram"),
                 )
             )
 
@@ -811,7 +823,7 @@ class _UtilityToolbarController:
             if value == "lfs.histogram" and not histogram_mode_available(lf.ui.context()):
                 lf.ui.set_panel_enabled(value, False)
                 return
-            lf.ui.set_panel_enabled(value, not lf.ui.is_panel_enabled(value))
+            lf.ui.set_panel_enabled(value, not _panel_enabled(value))
             return
         if action != "set_render_mode":
             return
@@ -1116,6 +1128,13 @@ class _ViewportToolbarController:
             if hasattr(lf, "get_vram_profiler_enabled")
             else False
         )
+        asset_manager_enabled = bool(
+            call(
+                False,
+                getattr(lf.ui, "is_panel_enabled", None),
+                _UtilityToolbarController._ASSET_MANAGER_PANEL_ID,
+            )
+        )
         return (
             trainer_state,
             self._utility.active_group,
@@ -1137,6 +1156,7 @@ class _ViewportToolbarController:
             bool(call(False, getattr(lf.ui, "is_sequencer_visible", None))),
             vram_profiler_enabled,
             bool(histogram_mode_available(ui_context)) if ui_context is not None else False,
+            asset_manager_enabled,
             bool(call(False, getattr(lf.ui, "is_panel_enabled", None), "lfs.histogram")),
         )
 
