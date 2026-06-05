@@ -60,16 +60,28 @@
     background-color: @{viewport.hover_bg};
 }
 
+.toolbar-vertical .icon-btn:hover,
+.toolbar-hcenter .icon-btn:hover {
+    background-color: @{alpha(primary,0.16)};
+    border-color: @{alpha(primary,0.42)};
+}
+
 .icon-btn.selected {
     background-color: @{primary};
 }
 
-.toolbar-vertical .icon-btn.selected {
+.toolbar-vertical .icon-btn.selected,
+.toolbar-hcenter .icon-btn.selected {
     border-color: @{alpha(text,0.25)};
 }
 
 .icon-btn.selected:hover {
     background-color: @{viewport.selected_hover};
+}
+
+.toolbar-vertical .icon-btn.selected:hover,
+.toolbar-hcenter .icon-btn.selected:hover {
+    border-color: @{alpha(text,0.35)};
 }
 
 .icon-btn.selected img {
