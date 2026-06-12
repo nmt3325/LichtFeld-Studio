@@ -33,15 +33,30 @@ PACK_STRUCT(struct VulkanGSRendererUniforms {
     // HiGS raster/compose wave window start; occupies the former alignment
     // padding before dist_coeffs (match shader).
     uint32_t wave_base;
+    // Splats per LOD pool page for the quant-pool projection variants.
+    uint32_t lod_page_splats;
     // 0 = median depth; > 0 = alpha-weighted (expected, hole-free) depth, with
     // this value as the far bound (splats beyond it are model junk that 3DGUT
     // projects onto sky pixels — excluded so they can't pollute the average).
     // Honored by the per-pixel rasterizer (alphablend_shader) regardless of backend.
     float expected_far;
+    // Explicit padding: dist_coeffs is a float4 on the shader side and must
+    // sit on a 16-byte boundary; both layouts pad here by hand so C++ and
+    // Slang can never silently disagree.
+    uint32_t uniforms_pad0;
+    uint32_t uniforms_pad1;
+    uint32_t uniforms_pad2;
     float dist_coeffs[4];
     float world_view_transform[16];
 });
-static_assert(sizeof(VulkanGSRendererUniforms) == 176);
+static_assert(sizeof(VulkanGSRendererUniforms) == 192);
+
+PACK_STRUCT(struct VulkanGSLodCompactUniforms {
+    uint32_t chunk_count;
+    uint32_t protected_capacity;
+    uint32_t miss_capacity;
+    uint32_t pad0;
+});
 
 PACK_STRUCT(struct VulkanGSLodSelectUniforms {
     uint32_t node_count;
@@ -68,7 +83,10 @@ PACK_STRUCT(struct VulkanGSLodSelectUniforms {
     uint32_t orthographic;
     uint32_t physical_node_count;
     uint32_t logical_chunk_count;
-    uint32_t pad4[3];
+    // Frame clock + fade window for newly streamed pages (0 disables fading).
+    uint32_t current_frame;
+    uint32_t fade_frames;
+    uint32_t pad4;
 });
 static_assert(sizeof(VulkanGSLodSelectUniforms) == 144);
 
@@ -108,6 +126,9 @@ PACK_STRUCT(struct VulkanGSSelectionPolygonRasterizeUniforms {
     uint32_t pad2;
 });
 
+inline constexpr uint32_t kLodCompactProtectedCap = 98304;
+inline constexpr uint32_t kLodCompactMissCap = 16384;
+
 class VulkanGSRenderer : public VulkanGSPipeline {
 public:
     struct PrimitiveVisibilityStats {
@@ -123,10 +144,13 @@ public:
         size_t candidate_count = 0;
         size_t rendered_capacity = 0;
         size_t overflow_count = 0;
-        // Per-logical-chunk traversal interest: 0 = untouched, 0xffffffff =
-        // rendered from this frame, otherwise float bits of the touching
+        // GPU-compacted traversal interest: chunks the cut renders from, and
+        // (chunk, priority) misses with priority = float bits of the touching
         // node's pixel scale (orderable as uint).
-        std::vector<uint32_t> chunk_touch;
+        std::vector<uint32_t> protected_chunks;
+        std::vector<std::pair<uint32_t, uint32_t>> miss_candidates;
+        uint32_t protected_overflow = 0;
+        uint32_t miss_overflow = 0;
     };
 
     VulkanGSRenderer();
@@ -239,7 +263,10 @@ public:
                                    VulkanGSPipelineBuffers& buffers,
                                    const _VulkanBuffer& node_bounds,
                                    const _VulkanBuffer& node_links,
-                                   const _VulkanBuffer& chunk_to_page);
+                                   const _VulkanBuffer& chunk_to_page,
+                                   const _VulkanBuffer& page_age,
+                                   const _VulkanBuffer& page_frames,
+                                   const _VulkanBuffer& page_to_chunk);
     void executeGenerateKeys(const VulkanGSRendererUniforms& uniforms, VulkanGSPipelineBuffers& buffers);
     void executeComputeTileRanges(const VulkanGSRendererUniforms& uniforms, VulkanGSPipelineBuffers& buffers);
     void executeRasterizeForward(const VulkanGSRendererUniforms& uniforms,
@@ -326,6 +353,10 @@ protected:
 
     _ComputePipeline pipeline_projection_forward = _ComputePipeline(24);
     _ComputePipeline pipeline_projection_forward_3dgut = _ComputePipeline(24);
+    // Canonical quantized LOD pool variants: same binding sets plus the
+    // per-page dequant frames appended last.
+    _ComputePipeline pipeline_projection_forward_quant = _ComputePipeline(25);
+    _ComputePipeline pipeline_projection_forward_quant_3dgut = _ComputePipeline(25);
     _ComputePipeline pipeline_selection_mask = _ComputePipeline(9);
     _ComputePipeline pipeline_selection_polygon_rasterize = _ComputePipeline(2);
     _ComputePipeline pipeline_generate_keys = _ComputePipeline(7);
@@ -336,7 +367,8 @@ protected:
     _ComputePipeline pipeline_prepare_tile_sort = _ComputePipeline(3);
     _ComputePipeline pipeline_compact_visible_primitives = _ComputePipeline(5);
     _ComputePipeline pipeline_lod_map_indices = _ComputePipeline(3);
-    _ComputePipeline pipeline_lod_select_threshold = _ComputePipeline(9);
+    _ComputePipeline pipeline_lod_select_threshold = _ComputePipeline(12);
+    _ComputePipeline pipeline_lod_compact_touch = _ComputePipeline(4);
     // HiGS viewer chain
     _ComputePipeline pipeline_cull_splats = _ComputePipeline(10);
     _ComputePipeline pipeline_cull_prepare = _ComputePipeline(2);
@@ -344,6 +376,8 @@ protected:
     // absent from the survivor variant.
     _ComputePipeline pipeline_projection_forward_survivors = _ComputePipeline(std::vector<int>{
         0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28});
+    _ComputePipeline pipeline_projection_forward_quant_survivors = _ComputePipeline(std::vector<int>{
+        0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29});
     _ComputePipeline pipeline_prepare_visible_chain = _ComputePipeline(4);
     _ComputePipeline pipeline_copy_visible_indices = _ComputePipeline(3);
     struct _CumsumIndirectComputePipeline {
@@ -441,6 +475,5 @@ protected:
     void ensureLodSelectionReadback(size_t chunk_capacity);
     void destroyLodSelectionReadback();
     void recordLodSelectionReadback(VulkanGSPipelineBuffers& buffers,
-                                    size_t rendered_capacity,
-                                    size_t chunk_count);
+                                    size_t rendered_capacity);
 };

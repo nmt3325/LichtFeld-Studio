@@ -255,15 +255,30 @@ namespace lfs::vis::gui {
                                     : "--";
             if (stats.pool_pages > 0 && stats.chunk_splats > 0) {
                 const std::size_t pool_splats = stats.pool_pages * stats.chunk_splats;
-                const std::string streaming =
+                std::string streaming =
                     stats.streaming_jobs > 0
                         ? std::format("{} pages loading", stats.streaming_jobs)
                         : (stats.resident_chunks >= stats.chunk_count ? "fully resident"
                                                                       : "idle");
-                state.cache_text = std::format("{}/{} pages | {} splat pool | {}",
-                                               formatLodCount(std::min(stats.resident_chunks, stats.pool_pages)),
+                if (stats.deferred_requests > 0) {
+                    streaming += std::format(" | {} deferred", stats.deferred_requests);
+                }
+                if (stats.admission_frozen) {
+                    streaming += " | FROZEN";
+                }
+                const std::size_t resident_pages = std::min(stats.resident_chunks, stats.pool_pages);
+                std::string utilization;
+                if (stats.gpu_selection && resident_pages > 0) {
+                    utilization = std::format(
+                        " | util {:.1f}%",
+                        100.0 * static_cast<double>(stats.selected_splats) /
+                            static_cast<double>(resident_pages * stats.chunk_splats));
+                }
+                state.cache_text = std::format("{}/{} pages | {} splat pool{} | {}",
+                                               formatLodCount(resident_pages),
                                                formatLodCount(stats.pool_pages),
                                                formatLodCount(pool_splats),
+                                               utilization,
                                                streaming);
             } else {
                 state.cache_text = "--";
