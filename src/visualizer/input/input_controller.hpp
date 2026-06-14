@@ -148,6 +148,8 @@ namespace lfs::vis {
 
         void handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event);
         bool handleFocusSelection(Viewport& target_viewport);
+        bool computeWholeSceneBounds(glm::vec3& out_min, glm::vec3& out_max) const;
+        float sceneExtent();
 
         // WASD processing with proper frame timing
         void processWASDMovement();
@@ -225,6 +227,11 @@ namespace lfs::vis {
         Viewport* orbit_coast_viewport_ = nullptr;
         Viewport* pan_coast_viewport_ = nullptr;
         Viewport* wasd_momentum_viewport_ = nullptr;
+
+        // Cached whole-scene radius (half the bounds diagonal) that scales WASD
+        // speed and pan distance with splat size; 0 means "recompute" (after scene
+        // load/clear).
+        float scene_extent_ = 0.0f;
         SplitViewPanelId drag_split_panel_ = SplitViewPanelId::Left;
         SplitViewPanelId node_rect_panel_ = SplitViewPanelId::Left;
         int node_rect_button_ = -1;

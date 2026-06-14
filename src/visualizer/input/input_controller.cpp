@@ -49,6 +49,25 @@ namespace lfs::vis {
         constexpr double kCameraFrustumClickThreshold = 5.0;
         namespace string_keys = lichtfeld::Strings;
 
+        // Expand [world_min, world_max] by a node's local AABB transformed to world space.
+        void expandNodeWorldBounds(const core::Scene& scene, const core::SceneNode& node,
+                                   glm::vec3& world_min, glm::vec3& world_max) {
+            glm::vec3 local_min, local_max;
+            if (!scene.getNodeBounds(node.id, local_min, local_max))
+                return;
+
+            const glm::mat4 world_xform = scene_coords::nodeVisualizerWorldTransform(scene, node.id);
+            for (int i = 0; i < 8; ++i) {
+                const glm::vec3 corner(
+                    (i & 1) ? local_max.x : local_min.x,
+                    (i & 2) ? local_max.y : local_min.y,
+                    (i & 4) ? local_max.z : local_min.z);
+                const glm::vec3 world_pt = glm::vec3(world_xform * glm::vec4(corner, 1.0f));
+                world_min = glm::min(world_min, world_pt);
+                world_max = glm::max(world_max, world_pt);
+            }
+        }
+
         [[nodiscard]] bool isTransformGizmoOverOrUsing() {
             return gui::isBoundsGizmoHovered() ||
                    gui::isBoundsGizmoActive() ||
@@ -323,11 +342,13 @@ namespace lfs::vis {
         scene_cleared_handler_id_ = state::SceneCleared::when([this](const auto&) {
             clearViewportDragState();
             clearWasdMomentumViewport();
+            scene_extent_ = 0.0f;
             focusSplitPanel(SplitViewPanelId::Left);
         });
         scene_loaded_handler_id_ = state::SceneLoaded::when([this](const auto&) {
             clearViewportDragState();
             clearWasdMomentumViewport();
+            scene_extent_ = 0.0f;
             focusSplitPanel(SplitViewPanelId::Left);
         });
 
@@ -1985,6 +2006,7 @@ namespace lfs::vis {
         if (movement_viewport && (keys_active || movement_viewport->camera.hasWasdMomentum())) {
             const float movement_speed_bonus =
                 (keys_active && (getModifierKeys() & input::KEYMOD_SHIFT) != 0) ? kWasdShiftSpeedBonus : 0.0f;
+            movement_viewport->camera.setSceneExtent(sceneExtent());
             movement_viewport->camera.advanceWasd(
                 delta_time,
                 keys_active && keys_movement_[0],
@@ -2307,48 +2329,62 @@ namespace lfs::vis {
 
         glm::vec3 total_min(std::numeric_limits<float>::max());
         glm::vec3 total_max(std::numeric_limits<float>::lowest());
-
-        // Accumulate world-space AABB from node's local bounds
-        const auto accumulateBounds = [&](const core::SceneNode* node) {
-            glm::vec3 local_min, local_max;
-            if (!scene.getNodeBounds(node->id, local_min, local_max))
-                return;
-
-            const glm::mat4 world_xform = scene_coords::nodeVisualizerWorldTransform(scene, node->id);
-            for (int i = 0; i < 8; ++i) {
-                const glm::vec3 corner(
-                    (i & 1) ? local_max.x : local_min.x,
-                    (i & 2) ? local_max.y : local_min.y,
-                    (i & 4) ? local_max.z : local_min.z);
-                const glm::vec3 world_pt = glm::vec3(world_xform * glm::vec4(corner, 1.0f));
-                total_min = glm::min(total_min, world_pt);
-                total_max = glm::max(total_max, world_pt);
-            }
-        };
+        bool has_bounds = false;
 
         if (selected.empty()) {
-            // Focus on entire scene (skip group nodes)
-            for (const auto* node : scene.getNodes()) {
-                if (node->type == core::NodeType::GROUP || node->type == core::NodeType::PLY_SEQUENCE ||
-                    node->type == core::NodeType::CAMERA_GROUP ||
-                    node->type == core::NodeType::IMAGE_GROUP)
-                    continue;
-                accumulateBounds(node);
-            }
+            has_bounds = computeWholeSceneBounds(total_min, total_max);
         } else {
-            // Focus on selected nodes
             for (const auto& name : selected) {
                 if (const auto* node = scene.getNode(name))
-                    accumulateBounds(node);
+                    expandNodeWorldBounds(scene, *node, total_min, total_max);
             }
+            has_bounds = total_min.x <= total_max.x;
         }
 
-        if (total_min.x <= total_max.x) {
+        if (has_bounds) {
             target_viewport.camera.focusOnBounds(total_min, total_max);
             publishCameraMove(&target_viewport);
             return true;
         }
         return false;
+    }
+
+    // Whole-scene world AABB, skipping container nodes that carry no geometry.
+    bool InputController::computeWholeSceneBounds(glm::vec3& out_min, glm::vec3& out_max) const {
+        if (!tool_context_)
+            return false;
+        auto* const sm = tool_context_->getSceneManager();
+        if (!sm)
+            return false;
+
+        const auto& scene = sm->getScene();
+        out_min = glm::vec3(std::numeric_limits<float>::max());
+        out_max = glm::vec3(std::numeric_limits<float>::lowest());
+
+        for (const auto* node : scene.getNodes()) {
+            if (node->type == core::NodeType::GROUP || node->type == core::NodeType::PLY_SEQUENCE ||
+                node->type == core::NodeType::CAMERA_GROUP ||
+                node->type == core::NodeType::IMAGE_GROUP)
+                continue;
+            expandNodeWorldBounds(scene, *node, out_min, out_max);
+        }
+
+        return out_min.x <= out_max.x;
+    }
+
+    // Cached whole-scene radius used to scale WASD speed and pan distance with
+    // splat size. Lazily computed after load (bounds may not exist the instant
+    // SceneLoaded fires) and invalidated on scene load/clear. Returns 0 while no
+    // geometry is present.
+    float InputController::sceneExtent() {
+        if (scene_extent_ > 0.0f)
+            return scene_extent_;
+
+        glm::vec3 min, max;
+        if (computeWholeSceneBounds(min, max))
+            scene_extent_ = glm::length(max - min) * 0.5f;
+
+        return scene_extent_;
     }
 
     bool InputController::focusSelection() {
@@ -2477,6 +2513,7 @@ namespace lfs::vis {
         LOG_PERF("InputController::beginPanDrag button={} pos=({},{})", button, x, y);
         const float current_time = static_cast<float>(SDL_GetTicks() / 1000.0f);
         interaction.viewport->camera.finishGlide();
+        interaction.viewport->camera.setSceneExtent(sceneExtent());
         interaction.viewport->camera.startPan(glm::vec2(x, y), current_time);
         drag_viewport_ = interaction.viewport;
         drag_split_panel_ = interaction.panel;
