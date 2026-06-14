@@ -650,7 +650,7 @@ namespace lfs::vis::gui {
         if (zoom_visible) {
             auto zoom_rml = std::format("{}: {:.0f}",
                                         stripColon(LOC(lichtfeld::Strings::Controls::ZOOM)),
-                                        zoom_speed * 10.0f);
+                                        zoom_speed);
             setModelBool("show_zoom", model_.show_zoom, true);
             setModelString("zoom_text", model_.zoom_text, std::move(zoom_rml));
             setModelString("zoom_color", model_.zoom_color, colorToRmlAlpha(p.info, zoom_alpha));
