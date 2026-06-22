@@ -92,6 +92,8 @@ namespace lfs::vis {
         std::vector<HitTestRect> titlebar_drag_excluded_rects_;
         bool native_titlebar_move_available_ = false;
         bool pending_titlebar_double_click_ = false;
+        bool titlebar_drag_active_ = false;
+        glm::ivec2 titlebar_drag_start_global_{0, 0};
         bool should_close_ = false;
 
         static void* callback_handler_;
@@ -101,6 +103,11 @@ namespace lfs::vis {
         std::vector<std::string> pending_drop_files_;
 
         void beginTitlebarNativeMove();
+        void beginTitlebarDrag();
+        void finishTitlebarDrag();
+        void finishTitlebarDragIfReleased();
+        [[nodiscard]] bool titlebarDragMovedEnough() const;
+        [[nodiscard]] bool isTitlebarDragAtDisplayTop() const;
         void flushPendingTitlebarDoubleClick();
     };
 

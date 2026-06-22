@@ -451,6 +451,7 @@ namespace lfs::vis {
             frame_input_.processEvent(event, main_window_id);
             processEvent(event);
         }
+        finishTitlebarDragIfReleased();
         frame_input_.finalize(window_);
         flushPendingTitlebarDoubleClick();
     }
@@ -477,6 +478,7 @@ namespace lfs::vis {
                 processEvent(event);
             }
         }
+        finishTitlebarDragIfReleased();
         frame_input_.finalize(window_);
         flushPendingTitlebarDoubleClick();
     }
@@ -522,6 +524,7 @@ namespace lfs::vis {
             if (input_controller_) {
                 input_controller_->onWindowFocusLost();
             }
+            titlebar_drag_active_ = false;
             break;
 
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
@@ -577,15 +580,24 @@ namespace lfs::vis {
             const int mouse_x = static_cast<int>(std::round(event.button.x));
             const int mouse_y = static_cast<int>(std::round(event.button.y));
             const bool titlebar_point = isTitlebarDragPoint(mouse_x, mouse_y);
-            if (event.button.button == SDL_BUTTON_LEFT && titlebar_point) {
-                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                    if (event.button.clicks >= 2 || pending_titlebar_double_click_) {
-                        pending_titlebar_double_click_ = true;
-                    } else if (native_titlebar_move_available_) {
-                        beginTitlebarNativeMove();
-                    }
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && titlebar_drag_active_) {
+                    finishTitlebarDrag();
+                    break;
                 }
-                break;
+
+                if (titlebar_point && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    if (event.button.clicks >= 2 || pending_titlebar_double_click_) {
+                        titlebar_drag_active_ = false;
+                        pending_titlebar_double_click_ = true;
+                    } else {
+                        beginTitlebarDrag();
+                        if (native_titlebar_move_available_) {
+                            beginTitlebarNativeMove();
+                        }
+                    }
+                    break;
+                }
             }
             if (!input_controller_)
                 break;
@@ -599,6 +611,8 @@ namespace lfs::vis {
 
         case SDL_EVENT_MOUSE_MOTION:
             if (!eventTargetsWindow(event, main_window_id))
+                break;
+            if (titlebar_drag_active_)
                 break;
             if (input_controller_) {
                 input_controller_->handleMouseMove(event.motion.x, event.motion.y);
@@ -747,6 +761,7 @@ namespace lfs::vis {
         titlebar_drag_height_px_ = 0;
         titlebar_drag_excluded_rects_.clear();
         pending_titlebar_double_click_ = false;
+        titlebar_drag_active_ = false;
     }
 
     bool WindowManager::isTitlebarDragPoint(const int x, const int y) const {
@@ -772,6 +787,106 @@ namespace lfs::vis {
             native_titlebar_move_available_ = false;
             LOG_WARN("Failed to start native titlebar window move; falling back to SDL hit-testing");
         }
+    }
+
+    void WindowManager::beginTitlebarDrag() {
+        if (!window_ || is_fullscreen_)
+            return;
+
+        float global_x = 0.0f;
+        float global_y = 0.0f;
+        SDL_GetGlobalMouseState(&global_x, &global_y);
+        titlebar_drag_start_global_ = glm::ivec2(
+            static_cast<int>(std::lround(global_x)),
+            static_cast<int>(std::lround(global_y)));
+
+        titlebar_drag_active_ = true;
+    }
+
+    void WindowManager::finishTitlebarDrag() {
+        if (!titlebar_drag_active_)
+            return;
+
+        const bool should_maximize = window_ &&
+                                     !is_fullscreen_ &&
+                                     !isMaximized() &&
+                                     titlebarDragMovedEnough() &&
+                                     isTitlebarDragAtDisplayTop();
+        titlebar_drag_active_ = false;
+
+        if (!should_maximize)
+            return;
+
+        if (!SDL_MaximizeWindow(window_)) {
+            LOG_WARN("Failed to maximize window from titlebar top-edge drag: {}", SDL_GetError());
+            return;
+        }
+
+        LOG_DEBUG("Maximized window from titlebar top-edge drag");
+        updateWindowSize("titlebar-drag-top-maximize");
+        wakeEventLoop();
+    }
+
+    void WindowManager::finishTitlebarDragIfReleased() {
+        if (!titlebar_drag_active_)
+            return;
+
+        const SDL_MouseButtonFlags buttons = SDL_GetGlobalMouseState(nullptr, nullptr);
+        if ((buttons & SDL_BUTTON_LMASK) != 0)
+            return;
+
+        finishTitlebarDrag();
+    }
+
+    bool WindowManager::titlebarDragMovedEnough() const {
+        if (!window_ || !titlebar_drag_active_)
+            return false;
+
+        float global_x = 0.0f;
+        float global_y = 0.0f;
+        SDL_GetGlobalMouseState(&global_x, &global_y);
+        const glm::ivec2 current_global(
+            static_cast<int>(std::lround(global_x)),
+            static_cast<int>(std::lround(global_y)));
+
+        constexpr int kPointerDragThresholdPx = 4;
+        const glm::ivec2 pointer_delta = glm::abs(current_global - titlebar_drag_start_global_);
+        return pointer_delta.x >= kPointerDragThresholdPx ||
+               pointer_delta.y >= kPointerDragThresholdPx;
+    }
+
+    bool WindowManager::isTitlebarDragAtDisplayTop() const {
+        if (!window_)
+            return false;
+
+        float global_x = 0.0f;
+        float global_y = 0.0f;
+        SDL_GetGlobalMouseState(&global_x, &global_y);
+        const SDL_Point global_point{
+            static_cast<int>(std::lround(global_x)),
+            static_cast<int>(std::lround(global_y)),
+        };
+
+        SDL_DisplayID display_id = SDL_GetDisplayForPoint(&global_point);
+        if (display_id == 0) {
+            display_id = SDL_GetDisplayForWindow(window_);
+        }
+        if (display_id == 0)
+            return false;
+
+        SDL_Rect display_bounds{};
+        if (!SDL_GetDisplayBounds(display_id, &display_bounds))
+            return false;
+
+        constexpr int kTopEdgeSnapSlopPx = 8;
+        const int display_right = display_bounds.x + display_bounds.w;
+        const bool within_display_x =
+            global_point.x >= display_bounds.x - kTopEdgeSnapSlopPx &&
+            global_point.x < display_right + kTopEdgeSnapSlopPx;
+        const bool at_display_top =
+            global_point.y >= display_bounds.y - kTopEdgeSnapSlopPx &&
+            global_point.y <= display_bounds.y + kTopEdgeSnapSlopPx;
+        return within_display_x && at_display_top;
     }
 
     void WindowManager::flushPendingTitlebarDoubleClick() {
