@@ -497,6 +497,10 @@
   "training": {
     "options.strategy.igs_plus": "IGS+",
     "refinement.grow_until_iter": "Grow until iteration",
+    "step_scaling.locked": "Auto",
+    "step_scaling.unlocked": "Manual",
+    "tooltip.step_scaling_locked": "Autoescala los parámetros de entrenamiento relevantes.",
+    "tooltip.step_scaling_unlocked": "Manual: los parámetros de entrenamiento no se autoescalan.",
     "tooltip.grow_until_iter": "Continue densification until this training iteration."
   },
   "training_panel": {

@@ -68,11 +68,18 @@
           <option value="mcmc" data-tooltip="training.tooltip.opt.strategy.mcmc">{{label_strategy_mcmc}}</option>
         </select>
       </div>
-      <div class="setting-row" data-tooltip="training.tooltip.iterations">
+      <div class="setting-row steps-scale-lock-row" data-tooltip="training.tooltip.iterations">
         <span class="prop-label">{{label_iterations}}</span>
         <input type="text" class="number-input" data-value="iterations_str" />
         <button class="num-step-btn" data-event-mousedown="num_step('iterations', -1)">-</button>
         <button class="num-step-btn" data-event-mousedown="num_step('iterations', 1)">+</button>
+        <button type="button"
+                class="icon-btn steps-scale-lock-btn"
+                data-class-selected="steps_scaling_lock_selected"
+                data-attr-title="steps_scaling_lock_tooltip"
+                data-event-click="toggle_step_scaling_lock">
+          <img data-attr-src="steps_scaling_lock_icon" />
+        </button>
       </div>
       <div class="setting-row" data-tooltip="training.tooltip.max_gaussians">
         <span class="prop-label">{{label_max_cap}}</span>
@@ -88,12 +95,6 @@
           <option value="2" data-tooltip="training.tooltip.opt.sh_degree.2">2</option>
           <option value="3" data-tooltip="training.tooltip.opt.sh_degree.3">3</option>
         </select>
-      </div>
-      <div class="setting-row" data-tooltip="training.tooltip.steps_scaler">
-        <span class="prop-label">{{label_steps_scaler}}</span>
-        <input type="text" class="number-input" data-value="steps_scaler_str" />
-        <button class="num-step-btn" data-event-mousedown="num_step('steps_scaler', -1)">-</button>
-        <button class="num-step-btn" data-event-mousedown="num_step('steps_scaler', 1)">+</button>
       </div>
     </div>
 

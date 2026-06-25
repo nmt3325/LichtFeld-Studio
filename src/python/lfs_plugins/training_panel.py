@@ -36,6 +36,11 @@ def tr(key):
     return result if result else key
 
 
+def tr_fallback(key, fallback):
+    result = lf.ui.tr(key)
+    return result if result and result != key else fallback
+
+
 class IterationRateTracker:
     WINDOW_SECONDS = 5.0
 
@@ -404,6 +409,7 @@ class TrainingPanel(Panel):
         self._checkpoint_saved_time = 0.0
         self._new_save_step = 7000
         self._auto_scaled_for_cameras = 0
+        self._auto_scale_steps_locked = True
         self._last_state = ""
         self._last_save_steps = None
         self._color_edit_prop = None
@@ -502,6 +508,16 @@ class TrainingPanel(Panel):
         model.bind_func("label_status_error", lambda: tr("status.error"))
         model.bind_func("label_status_stopping", lambda: tr("status.stopping"))
         model.bind_func("label_ppisp_sidecar_clear", lambda: tr("training_panel.clear"))
+        model.bind_func(
+            "steps_scaling_lock_label", self._step_scaling_lock_label
+        )
+        model.bind_func(
+            "steps_scaling_lock_tooltip", self._step_scaling_lock_tooltip
+        )
+        model.bind_func("steps_scaling_lock_icon", self._step_scaling_lock_icon)
+        model.bind_func(
+            "steps_scaling_lock_selected", lambda: self._auto_scale_steps_locked
+        )
 
         def _btn_start():
             it = RuntimeState.iteration.value
@@ -932,6 +948,7 @@ class TrainingPanel(Panel):
         return None
 
     def _commit_number_input_key(self, key):
+        original = self._text_bufs.get(key)
         buf_val = self._text_bufs.get(key)
         if buf_val is not None and buf_val.strip() and key.endswith("_str"):
             prop = key[:-4]
@@ -951,7 +968,7 @@ class TrainingPanel(Panel):
         canonical = self._canonical_text_buf_value(key)
         if canonical is None:
             return
-        if self._text_bufs.get(key) != canonical:
+        if original != canonical:
             self._text_bufs[key] = canonical
             self._mark_text_buf_dirty(key)
 
@@ -1136,6 +1153,29 @@ class TrainingPanel(Panel):
         model.bind_event("action", self._on_action)
         model.bind_event("remove_step", self._on_remove_step_event)
         model.bind_event("num_step", self._on_num_step)
+        model.bind_event(
+            "toggle_step_scaling_lock", self._on_step_scaling_lock_toggle
+        )
+
+    def _step_scaling_lock_label(self):
+        if self._auto_scale_steps_locked:
+            return tr_fallback("training.step_scaling.locked", "Auto")
+        return tr_fallback("training.step_scaling.unlocked", "Manual")
+
+    def _step_scaling_lock_tooltip(self):
+        if self._auto_scale_steps_locked:
+            return tr_fallback(
+                "training.tooltip.step_scaling_locked",
+                "Auto-scales relevant training parameters.",
+            )
+        return tr_fallback(
+            "training.tooltip.step_scaling_unlocked",
+            "Manual: training parameters are not auto-scaled.",
+        )
+
+    def _step_scaling_lock_icon(self):
+        state = "locked" if self._auto_scale_steps_locked else "unlocked"
+        return f"../icon/scene/{state}.png"
 
     def on_mount(self, doc):
         self._doc = doc
@@ -1639,10 +1679,34 @@ class TrainingPanel(Panel):
                 if self._handle:
                     self._sync_text_bufs()
                     self._handle.dirty_all()
+            elif prop == "iterations":
+                return self._set_iterations(params, val)
             else:
                 params.set(prop, val)
         except (ValueError, TypeError, RuntimeError):
             return False
+        return True
+
+    def _set_iterations(self, params, val):
+        if val <= 0:
+            return False
+        if not self._auto_scale_steps_locked:
+            params.iterations = val
+            return True
+
+        current = max(1, int(getattr(params, "iterations", 0)))
+        if current == val:
+            return True
+
+        current_scaler = float(getattr(params, "steps_scaler", 1.0))
+        if current_scaler <= 0.0:
+            current_scaler = 1.0
+        next_scaler = current_scaler * (float(val) / float(current))
+        params.apply_step_scaling(next_scaler)
+        params.iterations = val
+        if self._handle:
+            self._sync_text_bufs()
+            self._handle.dirty_all()
         return True
 
     def _set_ppisp_activation_step(self, val_str):
@@ -1806,6 +1870,9 @@ class TrainingPanel(Panel):
         if target is None:
             return
         self._commit_number_input_key(target.get_attribute("data-value", ""))
+
+    def _on_step_scaling_lock_toggle(self, *_args):
+        self._set_auto_scale_steps_locked(not self._auto_scale_steps_locked)
 
     def _apply_num_step(self, prop, direction):
         entry = _NUM_PROP_LOOKUP.get(prop)
@@ -2148,6 +2215,8 @@ class TrainingPanel(Panel):
         params.remove_eval_step(step)
 
     def _try_auto_scale_steps(self, params):
+        if not self._auto_scale_steps_locked:
+            return False
         scene = lf.get_scene()
         if scene is None:
             return False
@@ -2157,6 +2226,21 @@ class TrainingPanel(Panel):
         self._auto_scaled_for_cameras = camera_count
         params.auto_scale_steps(camera_count)
         return True
+
+    def _set_auto_scale_steps_locked(self, locked):
+        locked = bool(locked)
+        if self._auto_scale_steps_locked == locked:
+            return
+        self._auto_scale_steps_locked = locked
+
+        if locked:
+            self._auto_scaled_for_cameras = 0
+            params = lf.optimization_params()
+            if params and params.has_params() and self._try_auto_scale_steps(params):
+                self._sync_text_bufs()
+
+        if self._handle:
+            self._handle.dirty_all()
 
     def _draw_controls(self, layout, state, iteration):
         if state == "ready":
@@ -2318,15 +2402,25 @@ class TrainingPanel(Panel):
             layout.table_next_column()
             layout.label(tr("training_params.iterations"))
             layout.table_next_column()
-            layout.push_item_width(-1)
+            layout.push_item_width(-64)
             changed, new_val = layout.input_int_formatted(
                 "##py_iterations", int(params.iterations), 1000, 5000
             )
             if changed and new_val > 0:
-                params.iterations = new_val
+                self._set_iterations(params, new_val)
             layout.pop_item_width()
             if layout.is_item_hovered():
                 layout.set_tooltip(tr("training.tooltip.iterations"))
+            layout.same_line()
+            lock_style = "primary" if self._auto_scale_steps_locked else "secondary"
+            if layout.button_styled(
+                self._step_scaling_lock_label() + "##py_step_scaling_lock",
+                lock_style,
+                (58, 0),
+            ):
+                self._set_auto_scale_steps_locked(not self._auto_scale_steps_locked)
+            if layout.is_item_hovered():
+                layout.set_tooltip(self._step_scaling_lock_tooltip())
 
             layout.table_next_row()
             layout.table_next_column()
@@ -2376,20 +2470,6 @@ class TrainingPanel(Panel):
                 layout.pop_item_width()
                 if layout.is_item_hovered():
                     layout.set_tooltip(tr("training.tooltip.tile_mode"))
-
-            layout.table_next_row()
-            layout.table_next_column()
-            layout.label(tr("training_params.steps_scaler"))
-            layout.table_next_column()
-            layout.push_item_width(-1)
-            changed, new_val = layout.input_float(
-                "##py_steps_scaler", params.steps_scaler, 0.1, 0.5, "%.2f"
-            )
-            if changed:
-                params.apply_step_scaling(new_val)
-            layout.pop_item_width()
-            if layout.is_item_hovered():
-                layout.set_tooltip(tr("training.tooltip.steps_scaler"))
 
             layout.end_disabled()
 
