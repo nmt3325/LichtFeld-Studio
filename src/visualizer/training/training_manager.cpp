@@ -30,6 +30,20 @@ namespace lfs::vis {
     using namespace lfs::core::events;
 
     namespace {
+        [[nodiscard]] std::vector<size_t> normalize_save_steps(std::vector<size_t> steps) {
+            steps.erase(std::remove(steps.begin(), steps.end(), 0), steps.end());
+            std::sort(steps.begin(), steps.end());
+            steps.erase(std::unique(steps.begin(), steps.end()), steps.end());
+            return steps;
+        }
+
+        void apply_save_steps(lfs::core::param::OptimizationParameters& params,
+                              const std::vector<size_t>& steps) {
+            params.save_steps = steps;
+            if (params.enable_eval)
+                params.eval_steps = steps;
+        }
+
         [[nodiscard]] lfs::core::SplatTensorAllocator makeVulkanTrainingTensorAllocator(VisualizerImpl* viewer) {
             if (!viewer || !viewer->getWindowManager()) {
                 return {};
@@ -717,6 +731,48 @@ namespace lfs::vis {
         if (!trainer_)
             return 0;
         return trainer_->getParams().optimization.max_cap;
+    }
+
+    std::vector<size_t> TrainerManager::getSaveSteps() const {
+        if (auto* const param_mgr = services().paramsOrNull(); param_mgr && param_mgr->isLoaded())
+            return param_mgr->copyActiveParams().save_steps;
+        if (trainer_)
+            return trainer_->getParams().optimization.save_steps;
+        return pending_opt_params_.save_steps;
+    }
+
+    bool TrainerManager::canEditSaveSteps() const {
+        return !trainer_ ||
+               !trainer_->isInitialized() ||
+               !trainer_->getParams().resume_checkpoint.has_value();
+    }
+
+    bool TrainerManager::setSaveSteps(std::vector<size_t> save_steps) {
+        if (!canEditSaveSteps())
+            return false;
+
+        save_steps = normalize_save_steps(std::move(save_steps));
+        apply_save_steps(pending_opt_params_, save_steps);
+
+        bool updated_active_params = false;
+        if (auto* const param_mgr = services().paramsOrNull()) {
+            if (const auto loaded = param_mgr->ensureLoaded(); loaded) {
+                param_mgr->modifyActiveParams([&save_steps](auto& params) {
+                    apply_save_steps(params, save_steps);
+                });
+                updated_active_params = true;
+            } else {
+                LOG_WARN("Could not update save steps: {}", loaded.error());
+            }
+        }
+
+        if (!updated_active_params && trainer_) {
+            auto params = trainer_->getParams();
+            apply_save_steps(params.optimization, save_steps);
+            trainer_->setParams(params);
+        }
+
+        return true;
     }
 
     const char* TrainerManager::getStrategyType() const {
