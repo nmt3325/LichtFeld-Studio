@@ -40,6 +40,7 @@ namespace lfs::io {
             ImageFormat format = ImageFormat::PNG;
             int jpg_quality = 95;
             std::function<void(int, int)> progress_callback; // (current, total)
+            std::function<bool()> cancel_requested;
 
             // Trim range
             double start_time = 0.0;
