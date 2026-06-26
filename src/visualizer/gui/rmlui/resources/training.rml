@@ -232,12 +232,9 @@
       </div>
       <div class="setting-row setting-row--aligned" data-tooltip="training.tooltip.bg_color" data-if="dep_bg_color">
         <span class="setting-row__label-col">{{label_bg_color}}</span>
-        <div class="setting-row__control-col setting-row__control-col--color">
-          <span class="color-comp">{{bg_color_r}}</span>
-          <span class="color-comp">{{bg_color_g}}</span>
-          <span class="color-comp">{{bg_color_b}}</span>
+        <div class="setting-row__control-col setting-row__control-col--color color-compact-control">
           <div class="color-swatch" id="swatch-bg_color" data-event-click="color_click('bg_color')"></div>
-          <input type="text" class="color-hex" data-value="bg_color_hex" />
+          <input type="text" class="color-hex visible" data-value="bg_color_hex" />
         </div>
       </div>
       <div data-if="dep_bg_image">
@@ -664,6 +661,13 @@
     <color-picker id="color-picker-el"
       data-attr-red="picker_r" data-attr-green="picker_g" data-attr-blue="picker_b"
       data-event-change="picker_change" />
+    <div class="color-popup-fields">
+      <div class="color-rgb-row">
+        <input type="text" class="color-channel" data-value="bg_color_r" />
+        <input type="text" class="color-channel" data-value="bg_color_g" />
+        <input type="text" class="color-channel" data-value="bg_color_b" />
+      </div>
+    </div>
   </div>
 
   </div>

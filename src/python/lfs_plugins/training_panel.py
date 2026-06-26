@@ -211,9 +211,6 @@ LOCALE_KEYS = {
     "bg_option_modulation": "training.options.bg.modulation",
     "bg_option_image": "training.options.bg.image",
     "bg_option_random": "training.options.bg.random",
-    "bg_color_red_prefix": "training_panel.color_red_prefix",
-    "bg_color_green_prefix": "training_panel.color_green_prefix",
-    "bg_color_blue_prefix": "training_panel.color_blue_prefix",
     "enable_eval": "training_params.enable_eval",
     "test_every": "training.dataset.test_every",
 }
@@ -389,22 +386,16 @@ INITIALLY_COLLAPSED = {
 }
 
 
-def _color_to_hex(c):
-    return f"#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}"
-
-
-def _hex_to_color(h):
-    h = h.lstrip("#")
-    if len(h) != 6:
-        return None
-    try:
-        return (
-            int(h[0:2], 16) / 255.0,
-            int(h[2:4], 16) / 255.0,
-            int(h[4:6], 16) / 255.0,
-        )
-    except ValueError:
-        return None
+BG_COLOR_CHANNELS = (
+    ("bg_color_r", 0),
+    ("bg_color_g", 1),
+    ("bg_color_b", 2),
+)
+BG_COLOR_CHANNEL_INDEX = dict(BG_COLOR_CHANNELS)
+BG_COLOR_HEX_KEY = "bg_color_hex"
+BG_COLOR_TEXT_KEYS = tuple(key for key, _index in BG_COLOR_CHANNELS) + (
+    BG_COLOR_HEX_KEY,
+)
 
 
 class TrainingPanel(Panel):
@@ -921,14 +912,10 @@ class TrainingPanel(Panel):
         return tuple(params.bg_color)
 
     def _restore_bg_color_snapshot(self, snapshot):
-        params = lf.optimization_params()
-        if not params or not params.has_params():
-            return
         color = tuple(snapshot or (0.0, 0.0, 0.0))
-        params.bg_color = color
-        rs = lf.get_render_settings()
-        if rs:
-            rs.set("background_color", color)
+        if not self._set_training_bg_color(color):
+            return
+        self._sync_bg_color_text_bufs()
         if self._handle:
             self._handle.dirty_all()
 
@@ -961,6 +948,17 @@ class TrainingPanel(Panel):
         if key == "new_step_str":
             return f"{self._new_save_step:,}"
 
+        if key == BG_COLOR_HEX_KEY:
+            if p and p.has_params():
+                return w.color_to_hex(p.bg_color)
+            return "#000000"
+
+        for channel_key, channel_index in BG_COLOR_CHANNELS:
+            if key == channel_key:
+                if p and p.has_params():
+                    return w.color_channel_text(p.bg_color, channel_index)
+                return "0"
+
         return None
 
     def _commit_number_input_key(self, key):
@@ -988,6 +986,25 @@ class TrainingPanel(Panel):
             self._text_bufs[key] = canonical
             self._mark_text_buf_dirty(key)
 
+    def _commit_bg_color_text_key(self, key):
+        buf_val = self._text_bufs.get(key)
+        updated = False
+        if buf_val is not None and str(buf_val).strip():
+            if key == BG_COLOR_HEX_KEY:
+                updated = self._set_bg_color_hex(buf_val)
+            elif key in BG_COLOR_CHANNEL_INDEX:
+                updated = self._set_bg_color_channel(key, buf_val)
+
+        canonical = self._canonical_text_buf_value(key)
+        if canonical is None:
+            return
+        self._text_bufs[key] = canonical
+        if updated:
+            self._sync_bg_color_text_bufs()
+            self._dirty_bg_color_bindings()
+        else:
+            self._mark_text_buf_dirty(key)
+
     def _sync_text_bufs(self):
         p = lf.optimization_params()
         d = lf.dataset_params()
@@ -1011,6 +1028,25 @@ class TrainingPanel(Panel):
             f"{d.test_every:,}" if d and d.has_params() else "8"
         )
         self._text_bufs["new_step_str"] = f"{self._new_save_step:,}"
+        self._sync_bg_color_text_bufs(p)
+
+    def _sync_bg_color_text_bufs(self, params=None):
+        if params is None:
+            params = lf.optimization_params()
+        color = (
+            params.bg_color
+            if params and params.has_params()
+            else (0.0, 0.0, 0.0)
+        )
+        for key, channel_index in BG_COLOR_CHANNELS:
+            self._text_bufs[key] = w.color_channel_text(color, channel_index)
+        self._text_bufs[BG_COLOR_HEX_KEY] = w.color_to_hex(color)
+
+    def _dirty_bg_color_bindings(self):
+        if not self._handle:
+            return
+        for key in BG_COLOR_TEXT_KEYS:
+            self._handle.dirty(key)
 
     def _bind_slider_props(self, model, p):
         for prop in SLIDER_PROPS:
@@ -1030,26 +1066,33 @@ class TrainingPanel(Panel):
                 else (0, 0, 0)
             )
 
-        model.bind_func(
-            "bg_color_r",
-            lambda: f"{tr('training_panel.color_red_prefix')}{int(_bg()[0] * 255):>3d}",
-        )
-        model.bind_func(
-            "bg_color_g",
-            lambda: (
-                f"{tr('training_panel.color_green_prefix')}{int(_bg()[1] * 255):>3d}"
-            ),
-        )
-        model.bind_func(
-            "bg_color_b",
-            lambda: (
-                f"{tr('training_panel.color_blue_prefix')}{int(_bg()[2] * 255):>3d}"
-            ),
-        )
+        for key, channel_index in BG_COLOR_CHANNELS:
+            self._text_bufs[key] = None
+
+            def getter(k=key, idx=channel_index):
+                if self._text_bufs[k] is None:
+                    self._text_bufs[k] = w.color_channel_text(_bg(), idx)
+                return self._text_bufs[k]
+
+            def setter(v, k=key):
+                self._text_bufs[k] = str(v)
+
+            model.bind(key, getter, setter)
+
+        self._text_bufs[BG_COLOR_HEX_KEY] = None
+
+        def hex_getter():
+            if self._text_bufs[BG_COLOR_HEX_KEY] is None:
+                self._text_bufs[BG_COLOR_HEX_KEY] = w.color_to_hex(_bg())
+            return self._text_bufs[BG_COLOR_HEX_KEY]
+
+        def hex_setter(v):
+            self._text_bufs[BG_COLOR_HEX_KEY] = str(v)
+
         model.bind(
-            "bg_color_hex",
-            lambda: _color_to_hex(_bg()),
-            lambda v: self._set_bg_color_hex(v),
+            BG_COLOR_HEX_KEY,
+            hex_getter,
+            hex_setter,
         )
 
         model.bind_func(
@@ -1226,6 +1269,21 @@ class TrainingPanel(Panel):
                     self._capture_bg_color_snapshot,
                     self._restore_bg_color_snapshot,
                 )
+                el.add_event_listener("change", self._on_bg_color_hex_change)
+                el.add_event_listener("blur", self._on_bg_color_hex_blur)
+        for el in doc.query_selector_all("input.color-channel"):
+            key = el.get_attribute("data-value", "")
+            if key not in BG_COLOR_CHANNEL_INDEX:
+                continue
+            w.bind_select_all_on_focus(el)
+            self._escape_revert.bind(
+                el,
+                key,
+                self._capture_bg_color_snapshot,
+                self._restore_bg_color_snapshot,
+            )
+            el.add_event_listener("change", self._on_color_channel_input_change)
+            el.add_event_listener("blur", self._on_color_channel_input_blur)
         sidecar_input = doc.query_selector('input[data-value="ppisp_sidecar_path"]')
         if sidecar_input:
             w.bind_select_all_on_focus(sidecar_input)
@@ -1424,13 +1482,20 @@ class TrainingPanel(Panel):
         if c == self._last_bg_color:
             return False
         self._last_bg_color = c
+        self._sync_render_background_to_training(params)
+        self._sync_bg_color_text_bufs(params)
         swatch = doc.get_element_by_id("swatch-bg_color")
         if swatch:
-            r, g, b = int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)
+            r = w.color_channel_byte(c, 0)
+            g = w.color_channel_byte(c, 1)
+            b = w.color_channel_byte(c, 2)
             swatch.set_property("background-color", f"rgb({r},{g},{b})")
+        if self._handle:
+            self._dirty_bg_color_bindings()
         return True
 
     def on_scene_changed(self, doc):
+        self._sync_render_background_to_training()
         if self._handle:
             self._sync_text_bufs()
             self._handle.dirty_all()
@@ -1534,10 +1599,10 @@ class TrainingPanel(Panel):
         r = float(event.get_parameter("red", "0"))
         g = float(event.get_parameter("green", "0"))
         b = float(event.get_parameter("blue", "0"))
-        setattr(params, self._color_edit_prop, (r, g, b))
-        rs = lf.get_render_settings()
-        if rs and self._color_edit_prop == "bg_color":
-            rs.set("background_color", (r, g, b))
+        if self._color_edit_prop == "bg_color":
+            self._set_training_bg_color((r, g, b))
+        else:
+            setattr(params, self._color_edit_prop, (r, g, b))
         if self._handle:
             self._sync_text_bufs()
             self._handle.dirty_all()
@@ -1563,6 +1628,23 @@ class TrainingPanel(Panel):
             rs.set("raster_backend", "3dgut" if val else "3dgs")
             return
         rs.set(prop, val)
+
+    def _set_training_bg_color(self, color):
+        params = lf.optimization_params()
+        if not params or not params.has_params():
+            return False
+        normalized = w.normalize_color(color)
+        params.bg_color = normalized
+        self._sync_render_setting("background_color", normalized)
+        return True
+
+    def _sync_render_background_to_training(self, params=None):
+        if params is None:
+            params = lf.optimization_params()
+        if not params or not params.has_params():
+            return False
+        self._sync_render_setting("background_color", w.normalize_color(params.bg_color))
+        return True
 
     def _set_bool_prop(self, prop, val):
         params = lf.optimization_params()
@@ -1845,18 +1927,24 @@ class TrainingPanel(Panel):
         self._set_slider_prop(prop, value)
 
     def _set_bg_color_hex(self, hex_val):
+        color = w.hex_to_color(hex_val)
+        if color is not None and self._set_training_bg_color(color):
+            return True
+        return False
+
+    def _set_bg_color_channel(self, key, val_str):
         params = lf.optimization_params()
         if not params or not params.has_params():
-            return
-        color = _hex_to_color(hex_val)
-        if color:
-            params.bg_color = color
-            rs = lf.get_render_settings()
-            if rs:
-                rs.set("background_color", color)
-            if self._handle:
-                self._sync_text_bufs()
-                self._handle.dirty_all()
+            return False
+        parsed = w.parse_color_channel(val_str)
+        if parsed is None:
+            return False
+        channel_index = BG_COLOR_CHANNEL_INDEX.get(key)
+        if channel_index is None:
+            return False
+        color = list(w.normalize_color(params.bg_color))
+        color[channel_index] = parsed
+        return self._set_training_bg_color(color)
 
     # ── Event handlers ─────────────────────────────────────
 
@@ -1886,6 +1974,28 @@ class TrainingPanel(Panel):
         if target is None:
             return
         self._commit_number_input_key(target.get_attribute("data-value", ""))
+
+    def _on_color_channel_input_change(self, event):
+        if not event.get_bool_parameter("linebreak", False):
+            return
+        target = event.current_target()
+        if target is None:
+            return
+        self._commit_bg_color_text_key(target.get_attribute("data-value", ""))
+
+    def _on_color_channel_input_blur(self, event):
+        target = event.current_target()
+        if target is None:
+            return
+        self._commit_bg_color_text_key(target.get_attribute("data-value", ""))
+
+    def _on_bg_color_hex_change(self, event):
+        if not event.get_bool_parameter("linebreak", False):
+            return
+        self._commit_bg_color_text_key(BG_COLOR_HEX_KEY)
+
+    def _on_bg_color_hex_blur(self, event):
+        self._commit_bg_color_text_key(BG_COLOR_HEX_KEY)
 
     def _on_step_scaling_lock_toggle(self, *_args):
         self._set_auto_scale_steps_locked(not self._auto_scale_steps_locked)
@@ -2766,8 +2876,7 @@ class TrainingPanel(Panel):
                     "##py_bg_color", params.bg_color
                 )
                 if changed:
-                    params.bg_color = new_color
-                    self._sync_render_setting("background_color", new_color)
+                    self._set_training_bg_color(new_color)
                 layout.pop_item_width()
 
             if bg_mode_val == 2:
