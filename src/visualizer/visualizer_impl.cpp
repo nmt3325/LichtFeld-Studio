@@ -640,7 +640,7 @@ namespace lfs::vis {
             viewport_.camera.setPivot(target);
 
             if (rendering_manager_)
-                rendering_manager_->markDirty(DirtyFlag::CAMERA);
+                rendering_manager_->markCameraPoseChanged();
         });
         callback_cleanup_.add([] { vis::set_set_view_callback(nullptr); });
 
@@ -663,7 +663,7 @@ namespace lfs::vis {
             vp.setViewMatrix(*rotation, eye);
             vp.camera.setPivot(target);
 
-            rendering_manager_->markDirty(DirtyFlag::CAMERA);
+            rendering_manager_->markCameraPoseChanged();
         });
         callback_cleanup_.add([] { vis::set_set_view_for_panel_callback(nullptr); });
 
@@ -1804,7 +1804,7 @@ namespace lfs::vis {
                 selection_tool_->syncDepthFilterToCamera(viewport_);
             }
             if (rendering_manager_) {
-                rendering_manager_->markDirty(DirtyFlag::CAMERA);
+                rendering_manager_->markCameraPoseChanged();
             }
             ui::CameraMove{
                 .rotation = viewport_.getRotationMatrix(),
