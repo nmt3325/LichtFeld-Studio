@@ -795,6 +795,7 @@ class _UtilityToolbarController:
         ("camera-orbit", "orbit", "Orbit Camera"),
         ("world", "trackball", "Free Orbit Camera"),
         ("camera-fpv", "fpv", "Fly Camera"),
+        ("drone", "drone", "Drone Camera"),
     )
     _PRIMARY_ACTIONS = {
         "home": "CAMERA_RESET_HOME",

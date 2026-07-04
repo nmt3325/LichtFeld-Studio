@@ -1063,7 +1063,14 @@ def test_viewport_toolbar_update_syncs_utility_records(toolbar_module, monkeypat
     camera_buttons = model.handle.record_updates["camera_mode_buttons"]
     primary_buttons = model.handle.record_updates["utility_primary_buttons"]
     extra_buttons = model.handle.record_updates["utility_extra_buttons"]
-    assert len(camera_buttons) == 3
+    assert len(camera_buttons) == 4
+    assert [button["value"] for button in camera_buttons] == [
+        "orbit",
+        "trackball",
+        "fpv",
+        "drone",
+    ]
+    assert camera_buttons[3]["icon_src"] == "../icon/drone.png"
     assert [button["action"] for button in primary_buttons] == [
         "home",
         "focus_selection",

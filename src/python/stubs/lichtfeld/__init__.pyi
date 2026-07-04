@@ -433,7 +433,9 @@ def focus_selection() -> bool:
     """
 
 def get_camera_navigation_mode() -> str:
-    """Get the active camera navigation mode ('orbit', 'trackball', or 'fpv')"""
+    """
+    Get the active camera navigation mode ('orbit', 'trackball', 'fpv', or 'drone')
+    """
 
 def set_camera_navigation_mode(mode: str) -> None:
     """Set the active camera navigation mode"""
