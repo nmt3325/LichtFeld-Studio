@@ -13,6 +13,36 @@ endif()
 
 cmake_minimum_required(VERSION 3.30)
 
+# vcpkg manifest install runs during CMake configure/regeneration, outside the
+# native build tool's `cmake --build -j ...` limit. Cap vcpkg separately before
+# the toolchain is loaded by project().
+set(LFS_VCPKG_MAX_CONCURRENCY "" CACHE STRING "Maximum number of concurrent jobs vcpkg may use while building packages; empty uses environment or caps auto-detection at 16")
+set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY "${LFS_VCPKG_MAX_CONCURRENCY}")
+if(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY STREQUAL "")
+    if(DEFINED ENV{VCPKG_MAX_CONCURRENCY} AND NOT "$ENV{VCPKG_MAX_CONCURRENCY}" STREQUAL "")
+        set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY "$ENV{VCPKG_MAX_CONCURRENCY}")
+    elseif(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL} AND NOT "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" STREQUAL "")
+        set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+    else()
+        include(ProcessorCount)
+        ProcessorCount(_LFS_HOST_PROCESSOR_COUNT)
+        if(_LFS_HOST_PROCESSOR_COUNT EQUAL 0)
+            set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY 16)
+        elseif(_LFS_HOST_PROCESSOR_COUNT GREATER 16)
+            set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY 16)
+        else()
+            set(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY "${_LFS_HOST_PROCESSOR_COUNT}")
+        endif()
+    endif()
+endif()
+if(NOT _LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "LFS_VCPKG_MAX_CONCURRENCY must resolve to a positive integer, got '${_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY}'")
+endif()
+set(ENV{VCPKG_MAX_CONCURRENCY} "${_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY}")
+message(STATUS "vcpkg package build concurrency limited to ${_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY}")
+unset(_LFS_EFFECTIVE_VCPKG_MAX_CONCURRENCY)
+unset(_LFS_HOST_PROCESSOR_COUNT)
+
 option(LFS_ENFORCE_LINUX_GUI_BACKENDS "Fail configure when Linux SDL3 would lack X11 and Wayland support" ON)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LinuxGuiSanity.cmake")
