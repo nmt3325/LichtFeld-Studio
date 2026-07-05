@@ -93,6 +93,16 @@ because hosted runners provide a CUDA toolkit but not a visible GPU for
 `CMAKE_CUDA_ARCHITECTURES=native`; local builds can leave it unset for native
 GPU detection.
 
+## Preprocess Model Downloads
+
+The `preprocess` subcommand downloads the default MoGe-2 ONNX model on first
+use when `--model` is not provided. The cached model and every downloaded
+temporary file are SHA-256 verified on Windows and Linux before ONNX Runtime can
+load them. A hash mismatch deletes the untrusted temporary file, rejects the
+cached model, and exits with an error. Use `preprocess --download-only` to
+preload and verify the cache, or `--no-download` to require an already verified
+cache entry.
+
 ## Troubleshooting
 
 **"CUDA driver version is insufficient"** - Update NVIDIA driver.

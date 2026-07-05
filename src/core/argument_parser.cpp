@@ -1006,6 +1006,7 @@ namespace {
         "  Existing outputs are skipped by default for resumable runs.\n"
         "  Use --overwrite to recreate existing outputs.\n"
         "  PNG compression defaults to level 1; use 0 for fastest/largest files.\n"
+        "  The auto-downloaded default model is SHA-256 verified before use.\n"
         "\n";
 
     std::optional<lfs::core::param::OutputFormat> parseFormat(const std::string& str) {

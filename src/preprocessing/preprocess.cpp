@@ -44,6 +44,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -172,6 +173,11 @@ namespace {
         return root / "models" / "Ruicheng" / "moge-2-vitb-normal-onnx" / "model.onnx";
     }
 
+    class DownloadIntegrityError : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+
     std::string sha256_file(const fs::path& path) {
         std::ifstream input(path, std::ios::binary);
         if (!input)
@@ -203,6 +209,50 @@ namespace {
             out << std::setw(2) << static_cast<int>(byte);
         }
         return out.str();
+    }
+
+    void remove_file_if_exists(const fs::path& path) {
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+
+    void require_sha256(const fs::path& path,
+                        std::string_view expected_hash,
+                        std::string_view label) {
+        const auto hash = sha256_file(path);
+        if (hash == expected_hash)
+            return;
+
+        throw DownloadIntegrityError(std::string(label) + " SHA-256 mismatch for " +
+                                     path_to_string(path) + ": expected " +
+                                     std::string(expected_hash) + ", got " + hash);
+    }
+
+    void replace_file(const fs::path& source, const fs::path& destination) {
+        std::error_code ec;
+        fs::rename(source, destination, ec);
+        if (!ec)
+            return;
+
+        std::error_code exists_ec;
+        if (fs::exists(destination, exists_ec)) {
+            ec.clear();
+            fs::remove(destination, ec);
+            if (ec) {
+                remove_file_if_exists(source);
+                throw std::runtime_error("Could not replace " + path_to_string(destination) +
+                                         ": " + ec.message());
+            }
+
+            ec.clear();
+            fs::rename(source, destination, ec);
+        }
+
+        if (ec) {
+            remove_file_if_exists(source);
+            throw std::runtime_error("Could not move verified download to " +
+                                     path_to_string(destination) + ": " + ec.message());
+        }
     }
 
     size_t curl_write(void* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -237,7 +287,9 @@ namespace {
         return 0;
     }
 
-    void download_file(std::string_view url, const fs::path& destination) {
+    void download_verified_file(std::string_view url,
+                                const fs::path& destination,
+                                std::string_view expected_hash) {
         fs::create_directories(destination.parent_path());
         const fs::path tmp_path = destination.string() + ".tmp";
 
@@ -249,6 +301,8 @@ namespace {
         CURL* curl = curl_easy_init();
         if (!curl) {
             curl_global_cleanup();
+            output.close();
+            remove_file_if_exists(tmp_path);
             throw std::runtime_error("curl_easy_init failed");
         }
 
@@ -281,58 +335,75 @@ namespace {
         output.close();
 
         if (result != CURLE_OK) {
-            fs::remove(tmp_path);
+            remove_file_if_exists(tmp_path);
             throw std::runtime_error("Download failed: " + std::string(curl_easy_strerror(result)));
         }
         if (response_code >= 400) {
-            fs::remove(tmp_path);
+            remove_file_if_exists(tmp_path);
             throw std::runtime_error("Download failed with HTTP " + std::to_string(response_code));
         }
 
-        fs::rename(tmp_path, destination);
+        try {
+            require_sha256(tmp_path, expected_hash, "Downloaded model");
+        } catch (...) {
+            remove_file_if_exists(tmp_path);
+            throw;
+        }
+
+        replace_file(tmp_path, destination);
     }
 
     fs::path ensure_default_model(bool no_download) {
         const fs::path path = default_model_path();
         if (fs::is_regular_file(path)) {
-            const auto hash = sha256_file(path);
-            if (hash == kDefaultModelSha256)
+            try {
+                require_sha256(path, kDefaultModelSha256, "Cached model");
                 return path;
-            if (no_download) {
-                throw std::runtime_error("Cached model hash mismatch for " + path_to_string(path) +
-                                         ": expected " + std::string(kDefaultModelSha256) +
-                                         ", got " + hash);
+            } catch (const DownloadIntegrityError& e) {
+                if (no_download)
+                    throw;
+
+                std::cerr << e.what() << "\n";
+                remove_file_if_exists(path);
+                std::cerr << "Removed untrusted cached model; re-downloading "
+                          << path_to_string(path) << "\n";
             }
-            std::cerr << "Cached model hash mismatch; re-downloading " << path_to_string(path) << "\n";
         } else {
-            if (const fs::path legacy = legacy_model_path();
-                fs::is_regular_file(legacy) && sha256_file(legacy) == kDefaultModelSha256) {
-                fs::create_directories(path.parent_path());
-                std::error_code ec;
-                fs::rename(legacy, path, ec);
-                if (ec)
-                    fs::copy_file(legacy, path, fs::copy_options::overwrite_existing);
-                std::cout << "Migrated cached model to " << path_to_string(path) << "\n";
-                return path;
+            const fs::path legacy = legacy_model_path();
+            if (fs::is_regular_file(legacy)) {
+                try {
+                    require_sha256(legacy, kDefaultModelSha256, "Legacy cached model");
+                    fs::create_directories(path.parent_path());
+                    std::error_code ec;
+                    fs::rename(legacy, path, ec);
+                    if (ec)
+                        fs::copy_file(legacy, path, fs::copy_options::overwrite_existing);
+                    require_sha256(path, kDefaultModelSha256, "Cached model");
+                    std::cout << "Migrated cached model to " << path_to_string(path) << "\n";
+                    return path;
+                } catch (const DownloadIntegrityError& e) {
+                    std::cerr << e.what() << "\n";
+                    std::cerr << "Ignoring untrusted legacy cached model at "
+                              << path_to_string(legacy) << "\n";
+                }
             }
-            if (no_download)
+            if (no_download) {
                 throw std::runtime_error("Default model is not cached: " + path_to_string(path));
+            }
         }
 
         std::cout << "Downloading MoGe-2 ViT-B normal model (MIT license, (c) Microsoft) to "
                   << path_to_string(path) << "\n";
         try {
-            download_file(kDefaultModelUrl, path);
+            download_verified_file(kDefaultModelUrl, path, kDefaultModelSha256);
+        } catch (const DownloadIntegrityError&) {
+            throw;
         } catch (const std::exception& e) {
             std::cerr << "Primary download failed (" << e.what() << "); retrying from "
                       << kFallbackModelUrl << "\n";
-            download_file(kFallbackModelUrl, path);
+            download_verified_file(kFallbackModelUrl, path, kDefaultModelSha256);
         }
-        const auto hash = sha256_file(path);
-        if (hash != kDefaultModelSha256) {
-            throw std::runtime_error("Downloaded model hash mismatch: expected " +
-                                     std::string(kDefaultModelSha256) + ", got " + hash);
-        }
+        require_sha256(path, kDefaultModelSha256, "Cached model");
         return path;
     }
 
