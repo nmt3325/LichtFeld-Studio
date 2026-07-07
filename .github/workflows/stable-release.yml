@@ -1,0 +1,227 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Stable release build for personal forks of LichtFeld Studio.
+#
+# What this does:
+#   - Builds a portable Windows package from source using the same toolchain as
+#     the official nightly workflow (CUDA 12.8 + cuDNN 9 + vcpkg + Ninja).
+#   - Publishes the resulting .zip and a .sha256 sidecar as BOTH a GitHub
+#     Release asset and a workflow Artifact, so you can download it freely.
+#   - Unlike upstream nightly.yml it does NOT push to Cloudflare R2 and has no
+#     "github.repository == MrNeRF/..." guard, so it runs on your own fork.
+#
+# How to trigger:
+#   1. Push a version tag:  git tag v0.5.3 && git push origin v0.5.3
+#   2. Or run manually from the Actions tab (workflow_dispatch) and type the
+#      version (e.g. 0.5.3). To build a specific existing stable release from
+#      your fork, check that tag out onto a branch first, then dispatch from it.
+#
+# Requirements on your fork:
+#   - Actions enabled (Settings > Actions).
+#   - Default GITHUB_TOKEN is sufficient (see permissions below).
+
+name: Stable Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Stable version WITHOUT leading v (e.g. 0.5.3)'
+        required: true
+        type: string
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
+      VCPKG_BUILD_TYPE: release
+      CUDA_PATH: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8"
+      CUDNN_ROOT_DIR: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8"
+      BUILD_DIR: b
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Determine release version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          } else {
+            $version = ('${{ inputs.release_version }}').Trim() -replace '^v', ''
+          }
+          if ([string]::IsNullOrWhiteSpace($version) -or $version -notmatch '^[0-9]+(\.[0-9]+){1,2}$') {
+            throw "Stable version must look like 0.5.3; got '$version'."
+          }
+          Write-Host "Building stable version v$version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install CUDA 12.8
+        run: |
+          cd ..
+          Invoke-WebRequest https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe -OutFile cuda.exe -Verbose
+          Start-Process -FilePath .\cuda.exe -ArgumentList "-y -s -accepteula -toolkit -override -noDisplayDriver" -Wait
+
+      - name: Set CUDA environment
+        run: |
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CUDA_PATH_V12_8=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CUDNN_ROOT_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Ensure cuDNN is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cudaPath = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8'
+          $include = Join-Path $cudaPath 'include\cudnn.h'
+          $libs = @(Get-ChildItem (Join-Path $cudaPath 'lib\x64') -Filter 'cudnn*.lib' -ErrorAction SilentlyContinue)
+          $dlls = @(Get-ChildItem (Join-Path $cudaPath 'bin') -Filter 'cudnn*64_9.dll' -ErrorAction SilentlyContinue)
+          if ((Test-Path $include) -and $libs.Count -gt 0 -and $dlls.Count -gt 0) {
+            Write-Host "Using provided cuDNN."
+          } else {
+            Write-Host "Installing cuDNN 9.5.0 for CUDA 12 from NVIDIA redist."
+            $url = 'https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.0.50_cuda12-archive.zip'
+            Invoke-WebRequest $url -OutFile cudnn.zip -Verbose
+            Expand-Archive cudnn.zip -DestinationPath cudnn
+            $root = Get-ChildItem cudnn -Directory | Select-Object -First 1
+            if (-not $root) { throw "Could not find extracted cuDNN archive root." }
+            Copy-Item "$($root.FullName)\bin\*" (Join-Path $cudaPath 'bin') -Recurse -Force
+            Copy-Item "$($root.FullName)\include\*" (Join-Path $cudaPath 'include') -Recurse -Force
+            Copy-Item "$($root.FullName)\lib\x64\*" (Join-Path $cudaPath 'lib\x64') -Recurse -Force
+          }
+          if (-not (Test-Path $include)) { throw "cuDNN header not found after setup: $include" }
+          $libs = @(Get-ChildItem (Join-Path $cudaPath 'lib\x64') -Filter 'cudnn*.lib' -ErrorAction SilentlyContinue)
+          $dlls = @(Get-ChildItem (Join-Path $cudaPath 'bin') -Filter 'cudnn*64_9.dll' -ErrorAction SilentlyContinue)
+          if ($libs.Count -eq 0 -or $dlls.Count -eq 0) { throw "cuDNN 9 library or DLL not found after setup." }
+          "CUDNN_ROOT_DIR=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cache vcpkg tool
+        id: cache-vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-tool-${{ runner.os }}-2026-03-12
+          restore-keys: vcpkg-tool-${{ runner.os }}-
+
+      - name: Setup vcpkg
+        if: steps.cache-vcpkg-tool.outputs.cache-hit != 'true'
+        run: |
+          cd ..
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg_installed
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-installed-${{ runner.os }}-prebuilt-ort-v1-
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = $env:BUILD_DIR
+          $cmakeArgs = "-B $buildDir -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON -DBUILD_PYTHON_STUBS=OFF"
+          $retryablePatterns = @('status code 5\d\d','timed out','timeout','connection reset','failed to connect','temporarily unavailable','tls','ssl')
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Configure attempt $attempt/3"
+            cmd /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake $cmakeArgs"
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            $shouldRetry = $false
+            $manifestLog = Join-Path $buildDir 'vcpkg-manifest-install.log'
+            if (Test-Path $manifestLog) {
+              foreach ($pattern in $retryablePatterns) {
+                if (Select-String -Path $manifestLog -Pattern $pattern -Quiet) { $shouldRetry = $true; break }
+              }
+            }
+            if (-not $shouldRetry -or $attempt -eq 3) { exit $LASTEXITCODE }
+            Write-Warning "Retryable configure failure detected, cleaning build tree before retry."
+            if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build %BUILD_DIR% -j %NUMBER_OF_PROCESSORS%
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $packageName = "LichtFeld-Studio-windows-v$version.zip"
+          cmake --install $env:BUILD_DIR --prefix dist
+          Compress-Archive -Path dist\* -DestinationPath $packageName -Force
+          $checksum = (Get-FileHash -Algorithm SHA256 -Path $packageName).Hash.ToLowerInvariant()
+          Set-Content -Path "$packageName.sha256" -Value "$checksum  $packageName" -Encoding ascii
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+
+      - name: Dump failure diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $buildDir = $env:BUILD_DIR
+          $paths = @(
+            "$buildDir\vcpkg-manifest-install.log",
+            "$buildDir\CMakeFiles\CMakeConfigureLog.yaml",
+            "$buildDir\CMakeFiles\CMakeError.log",
+            "$buildDir\CMakeFiles\CMakeOutput.log",
+            "$buildDir\CMakeCache.txt"
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Write-Host "::group::$path"
+              Get-Content $path -Tail 400
+              Write-Host "::endgroup::"
+            }
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LichtFeld-Studio-windows-v${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ steps.package.outputs.package_name }}
+            ${{ steps.package.outputs.package_name }}.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: LichtFeld Studio v${{ steps.version.outputs.version }}
+          draft: ${{ inputs.draft || false }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.package.outputs.package_name }}
+            ${{ steps.package.outputs.package_name }}.sha256
