@@ -1,0 +1,267 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Stable release build (Ubuntu / Linux x86_64) for personal forks of
+# LichtFeld Studio.
+#
+# What this does:
+#   - Builds a portable Linux package from source inside the official
+#     nvidia/cuda:12.8.0-devel-ubuntu24.04 container (same toolchain as the
+#     upstream ubuntu.yml CI: CUDA 12.8 + cuDNN 9 + vcpkg + Ninja + gcc-14).
+#   - Publishes the resulting .tar.gz and a .sha256 sidecar as BOTH a GitHub
+#     Release asset and a workflow Artifact, so you can download it freely.
+#   - Unlike upstream ubuntu.yml it has no "github.repository == MrNeRF/..."
+#     guard and builds only Release, so it runs on your own fork.
+#
+# How to trigger:
+#   1. Push a version tag:  git tag v0.5.3 && git push origin v0.5.3
+#   2. Or run manually from the Actions tab (workflow_dispatch) and type the
+#      version (e.g. 0.5.3).
+#
+# Note: the produced binary still needs an NVIDIA GPU + proprietary driver and
+# a desktop (X11 / XWayland) session to actually run; the build itself needs
+# no GPU.
+
+name: Stable Release Build (Ubuntu)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Stable version WITHOUT leading v (e.g. 0.5.3)'
+        required: true
+        type: string
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.0-devel-ubuntu24.04
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
+      CC: gcc-14
+      CXX: g++-14
+      VCPKG_BUILD_TYPE: release
+      VCPKG_FORCE_SYSTEM_BINARIES: 1
+      CMAKE_MAKE_PROGRAM: /usr/bin/ninja
+      CUDA_PATH: /usr/local/cuda
+      CUDNN_ROOT_DIR: /usr/local/cuda
+      BUILD_TYPE: Release
+
+    steps:
+      - name: Install Git
+        run: |
+          apt-get update
+          apt-get install -y git
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="${{ inputs.release_version }}"
+            version="${version#v}"
+          fi
+          version="$(echo -n "$version" | tr -d '[:space:]')"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "Stable version must look like 0.5.3; got '$version'." >&2
+            exit 1
+          fi
+          echo "Building stable version v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        run: |
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+          rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /usr/local/lib/android /opt/az
+          rm -rf /usr/local/cuda/nsight* /usr/local/cuda/compute-sanitizer
+          rm -rf /usr/local/cuda/extras /usr/local/cuda/tools
+          rm -rf /usr/local/cuda/doc
+          find /usr/local/cuda/targets/x86_64-linux/lib -name '*.a' \
+            ! -name 'libcudart_static.a' \
+            ! -name 'libcudadevrt.a' \
+            ! -name 'libnvjpeg_static.a' \
+            ! -name 'libnvjpeg2k_static.a' \
+            ! -name 'libculibos.a' \
+            -delete 2>/dev/null || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y ca-certificates gpg wget
+
+          wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | tee /etc/apt/sources.list.d/kitware.list >/dev/null
+          apt-get update
+
+          apt-get install -y git curl unzip cmake gcc-14 g++-14 ccache ninja-build \
+            zip tar pkg-config python3 python3-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libdecor-0-dev libibus-1.0-dev libdbus-1-dev \
+            libsystemd-dev libgtk-3-dev \
+            nasm autoconf autoconf-archive automake libtool
+
+          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 \
+                              --slave /usr/bin/g++ g++ /usr/bin/g++-14
+
+      - name: Ensure cuDNN is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f /usr/local/cuda/include/cudnn.h ] && \
+             find -L /usr/local/cuda /usr/lib /usr/lib/x86_64-linux-gnu -name 'libcudnn.so.9*' -print -quit | grep -q .; then
+            echo "Using preinstalled cuDNN:"
+            find -L /usr/local/cuda /usr/lib /usr/lib/x86_64-linux-gnu -name 'libcudnn.so.9*' -print | head
+            exit 0
+          fi
+
+          echo "cuDNN 9 was not provided by the runner image; installing cuDNN 9.5.0 for CUDA 12 from NVIDIA redist."
+          CUDNN_URL="https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.5.0.50_cuda12-archive.tar.xz"
+          mkdir -p /tmp/cudnn-redist
+          curl -L --retry 5 --retry-delay 10 "$CUDNN_URL" -o /tmp/cudnn.tar.xz
+          tar -xf /tmp/cudnn.tar.xz --strip-components=1 -C /tmp/cudnn-redist --exclude='*.a'
+          rm -f /tmp/cudnn.tar.xz
+          cp -a /tmp/cudnn-redist/include/. /usr/local/cuda/include/
+          cp -a /tmp/cudnn-redist/lib/. /usr/local/cuda/lib64/
+          rm -rf /tmp/cudnn-redist
+          ldconfig
+          test -f /usr/local/cuda/include/cudnn.h
+          if ! find -L /usr/local/cuda/lib64 -name 'libcudnn.so.9*' -print -quit | grep -q .; then
+            echo "cuDNN 9 library was not found after setup." >&2
+            exit 1
+          fi
+          find -L /usr/local/cuda/lib64 -name 'libcudnn.so.9*' -print | head
+          df -h
+
+      - name: Cache vcpkg tool
+        id: cache-vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-tool-${{ runner.os }}-2026-02-21
+          restore-keys: vcpkg-tool-${{ runner.os }}-
+
+      - name: Setup vcpkg
+        if: steps.cache-vcpkg-tool.outputs.cache-hit != 'true'
+        run: |
+          cd ..
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Configure vcpkg triplet
+        run: |
+          cat >> $VCPKG_ROOT/triplets/x64-linux.cmake << 'EOF'
+          set(VCPKG_BUILD_TYPE release)
+          set(VCPKG_MAX_CONCURRENCY 2)
+          EOF
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: ccache-${{ runner.os }}-Release-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-Release-
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/vcpkg/archives
+          key: vcpkg-pkgs-${{ runner.os }}-linux-gui-prebuilt-ort-v1-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-pkgs-${{ runner.os }}-linux-gui-prebuilt-ort-
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PORTABLE=ON \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+            -DBUILD_PYTHON_STUBS=OFF \
+            -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF \
+            -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
+            -DCUDA_DEVICE_DEBUG=OFF \
+            -DCMAKE_C_FLAGS="-pipe -gz" \
+            -DCMAKE_CXX_FLAGS="-pipe -gz" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--compress-debug-sections=zlib" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--compress-debug-sections=zlib"
+
+      - name: Clean vcpkg buildtrees
+        run: |
+          rm -rf build/vcpkg_installed/vcpkg/blds build/vcpkg_installed/vcpkg/pkgs
+          rm -rf "$VCPKG_ROOT"/buildtrees "$VCPKG_ROOT"/downloads "$VCPKG_ROOT"/packages
+          df -h
+
+      - name: Build
+        run: cmake --build build -j $(nproc)
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package_name="LichtFeld-Studio-linux-x86_64-v${version}.tar.gz"
+          rm -rf dist
+          cmake --install build --prefix dist
+          tar -czf "$package_name" -C dist .
+          sha256sum "$package_name" > "${package_name}.sha256"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          ls -lh "$package_name" "${package_name}.sha256"
+
+      - name: Dump failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          for f in \
+            build/vcpkg-manifest-install.log \
+            build/CMakeFiles/CMakeConfigureLog.yaml \
+            build/CMakeFiles/CMakeError.log \
+            build/CMakeFiles/CMakeOutput.log \
+            build/CMakeCache.txt; do
+            if [ -f "$f" ]; then
+              echo "::group::$f"
+              tail -n 400 "$f"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LichtFeld-Studio-linux-x86_64-v${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ steps.package.outputs.package_name }}
+            ${{ steps.package.outputs.package_name }}.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: LichtFeld Studio v${{ steps.version.outputs.version }}
+          draft: ${{ inputs.draft || false }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.package.outputs.package_name }}
+            ${{ steps.package.outputs.package_name }}.sha256
