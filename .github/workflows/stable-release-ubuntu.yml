@@ -11,6 +11,9 @@
 #     Release asset and a workflow Artifact, so you can download it freely.
 #   - Unlike upstream ubuntu.yml it has no "github.repository == MrNeRF/..."
 #     guard and builds only Release, so it runs on your own fork.
+#   - Fixes an upstream portable-packaging gap: the embedded-Python extension
+#     (lichtfeld*.so) depends on libs like libOpenMeshTools that CMake never
+#     bundles, so we copy the extension's missing runtime deps into lib/.
 #
 # How to trigger:
 #   1. Push a version tag:  git tag v0.5.3 && git push origin v0.5.3
@@ -19,7 +22,7 @@
 #
 # Note: the produced binary still needs an NVIDIA GPU + proprietary driver and
 # a desktop (X11 / XWayland) session to actually run; the build itself needs
-# no GPU.
+# no GPU. Launch with ./run_lichtfeld.sh (it sets LD_LIBRARY_PATH).
 
 name: Stable Release Build (Ubuntu)
 
@@ -222,6 +225,44 @@ jobs:
           package_name="LichtFeld-Studio-linux-x86_64-v${version}.tar.gz"
           rm -rf dist
           cmake --install build --prefix dist
+
+          # --- Bundle Python-extension runtime deps missed by upstream packaging ---
+          # CMake bundles the main executable's deps, but the embedded-Python
+          # extension (lichtfeld*.so) also needs libs such as libOpenMeshTools
+          # that are never bundled, causing an ImportError at runtime.
+          # run_lichtfeld.sh adds ../lib to LD_LIBRARY_PATH, so copying the
+          # extension's missing shared libs into dist/lib resolves them.
+          vlib="build/vcpkg_installed/x64-linux/lib"
+          mkdir -p dist/lib
+          ext="$(find dist -name 'lichtfeld*.so' -print -quit || true)"
+          if [ -n "${ext:-}" ] && [ -d "$vlib" ]; then
+            echo "Resolving runtime deps for Python extension: $ext"
+            for _pass in 1 2 3 4 5 6 7 8; do
+              missing="$(LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | awk '/not found/{print $1}' | sort -u || true)"
+              [ -z "$missing" ] && break
+              copied=0
+              for soname in $missing; do
+                src="$(find "$vlib" -maxdepth 1 -name "$soname" -print -quit || true)"
+                if [ -z "$src" ]; then
+                  stem="${soname%%.so*}.so"
+                  src="$(find "$vlib" -maxdepth 1 -name "${stem}*" -print -quit || true)"
+                fi
+                if [ -n "$src" ]; then
+                  cp -aL "$src" "dist/lib/$soname" 2>/dev/null || cp -a "$src" dist/lib/
+                  echo "  bundled $soname (from $src)"
+                  copied=1
+                else
+                  echo "  WARN: could not locate $soname under $vlib" >&2
+                fi
+              done
+              [ "$copied" -eq 0 ] && break
+            done
+            echo "Remaining unresolved deps for the Python extension (should be none):"
+            LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | grep 'not found' || echo "  none"
+          else
+            echo "WARN: Python extension or vcpkg lib dir not found; skipping dep bundling." >&2
+          fi
+
           tar -czf "$package_name" -C dist .
           sha256sum "$package_name" > "${package_name}.sha256"
           echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
