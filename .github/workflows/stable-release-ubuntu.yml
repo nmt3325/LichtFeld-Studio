@@ -232,27 +232,29 @@ jobs:
           # that are never bundled, causing an ImportError at runtime.
           # run_lichtfeld.sh adds ../lib to LD_LIBRARY_PATH, so copying the
           # extension's missing shared libs into dist/lib resolves them.
-          vlib="build/vcpkg_installed/x64-linux/lib"
+          # Search the WHOLE build tree: some deps (e.g. libOpenMeshTools from
+          # external/OpenMesh) are NOT vcpkg packages and live in build/external,
+          # not vcpkg_installed/lib.
           mkdir -p dist/lib
           ext="$(find dist -name 'lichtfeld*.so' -print -quit || true)"
-          if [ -n "${ext:-}" ] && [ -d "$vlib" ]; then
+          if [ -n "${ext:-}" ]; then
             echo "Resolving runtime deps for Python extension: $ext"
-            for _pass in 1 2 3 4 5 6 7 8; do
+            for _pass in 1 2 3 4 5 6 7 8 9 10; do
               missing="$(LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | awk '/not found/{print $1}' | sort -u || true)"
               [ -z "$missing" ] && break
               copied=0
               for soname in $missing; do
-                src="$(find "$vlib" -maxdepth 1 -name "$soname" -print -quit || true)"
+                src="$(find build -name "$soname" -print -quit 2>/dev/null || true)"
                 if [ -z "$src" ]; then
                   stem="${soname%%.so*}.so"
-                  src="$(find "$vlib" -maxdepth 1 -name "${stem}*" -print -quit || true)"
+                  src="$(find build -name "${stem}*" -print -quit 2>/dev/null || true)"
                 fi
                 if [ -n "$src" ]; then
                   cp -aL "$src" "dist/lib/$soname" 2>/dev/null || cp -a "$src" dist/lib/
                   echo "  bundled $soname (from $src)"
                   copied=1
                 else
-                  echo "  WARN: could not locate $soname under $vlib" >&2
+                  echo "  WARN: could not locate $soname anywhere under build/" >&2
                 fi
               done
               [ "$copied" -eq 0 ] && break
@@ -260,7 +262,7 @@ jobs:
             echo "Remaining unresolved deps for the Python extension (should be none):"
             LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | grep 'not found' || echo "  none"
           else
-            echo "WARN: Python extension or vcpkg lib dir not found; skipping dep bundling." >&2
+            echo "WARN: Python extension not found; skipping dep bundling." >&2
           fi
 
           tar -czf "$package_name" -C dist .
