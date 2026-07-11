@@ -11,9 +11,6 @@
 #     Release asset and a workflow Artifact, so you can download it freely.
 #   - Unlike upstream ubuntu.yml it has no "github.repository == MrNeRF/..."
 #     guard and builds only Release, so it runs on your own fork.
-#   - Fixes an upstream portable-packaging gap: the embedded-Python extension
-#     (lichtfeld*.so) depends on libs like libOpenMeshTools that CMake never
-#     bundles, so we copy the extension's missing runtime deps into lib/.
 #
 # How to trigger:
 #   1. Push a version tag:  git tag v0.5.3 && git push origin v0.5.3
@@ -22,7 +19,7 @@
 #
 # Note: the produced binary still needs an NVIDIA GPU + proprietary driver and
 # a desktop (X11 / XWayland) session to actually run; the build itself needs
-# no GPU. Launch with ./run_lichtfeld.sh (it sets LD_LIBRARY_PATH).
+# no GPU.
 
 name: Stable Release Build (Ubuntu)
 
@@ -192,22 +189,6 @@ jobs:
           key: vcpkg-pkgs-${{ runner.os }}-linux-gui-prebuilt-ort-v1-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-pkgs-${{ runner.os }}-linux-gui-prebuilt-ort-
 
-      - name: Patch portable CPU baseline (-march=native)
-        run: |
-          # ROOT CAUSE of "Illegal instruction (SIGILL)": src/core/CMakeLists.txt
-          # compiles Release with -march=native, baking the CI runner's CPU
-          # features (GitHub runners often have AVX-512) into the binary. On user
-          # CPUs lacking those (most consumer Intel 12-14th gen have AVX-512
-          # fused off; AMD Zen3 lacks it) it crashes before the first log line.
-          # Pin to x86-64-v3 (AVX2/FMA/BMI2) = portable + keeps the AVX2 the code
-          # already assumes.
-          for f in $(grep -rl 'march=native' src 2>/dev/null || true); do
-            sed -i 's/-march=native/-march=x86-64-v3/g' "$f"
-            echo "patched $f"
-          done
-          echo "Remaining -march=native (should be none):"
-          grep -rn 'march=native' src || echo "  none"
-
       - name: Configure
         run: |
           cmake -B build -S . -G Ninja \
@@ -241,46 +222,6 @@ jobs:
           package_name="LichtFeld-Studio-linux-x86_64-v${version}.tar.gz"
           rm -rf dist
           cmake --install build --prefix dist
-
-          # --- Bundle Python-extension runtime deps missed by upstream packaging ---
-          # CMake bundles the main executable's deps, but the embedded-Python
-          # extension (lichtfeld*.so) also needs libs such as libOpenMeshTools
-          # that are never bundled, causing an ImportError at runtime.
-          # run_lichtfeld.sh adds ../lib to LD_LIBRARY_PATH, so copying the
-          # extension's missing shared libs into dist/lib resolves them.
-          # Search the WHOLE build tree: some deps (e.g. libOpenMeshTools from
-          # external/OpenMesh) are NOT vcpkg packages and live in build/external,
-          # not vcpkg_installed/lib.
-          mkdir -p dist/lib
-          ext="$(find dist -name 'lichtfeld*.so' -print -quit || true)"
-          if [ -n "${ext:-}" ]; then
-            echo "Resolving runtime deps for Python extension: $ext"
-            for _pass in 1 2 3 4 5 6 7 8 9 10; do
-              missing="$(LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | awk '/not found/{print $1}' | sort -u || true)"
-              [ -z "$missing" ] && break
-              copied=0
-              for soname in $missing; do
-                # Never touch libs already bundled for the main executable.
-                if [ -e "dist/lib/$soname" ]; then continue; fi
-                # EXACT soname match only (no loose version glob that could grab a
-                # wrong-ABI library and rename it, which can itself cause SIGILL).
-                src="$(find build -name "$soname" -print -quit 2>/dev/null || true)"
-                if [ -n "$src" ]; then
-                  cp -aL "$src" "dist/lib/$soname" 2>/dev/null || cp -a "$src" dist/lib/
-                  echo "  bundled $soname (from $src)"
-                  copied=1
-                else
-                  echo "  WARN: exact match for $soname not found under build/" >&2
-                fi
-              done
-              [ "$copied" -eq 0 ] && break
-            done
-            echo "Remaining unresolved deps for the Python extension (should be none):"
-            LD_LIBRARY_PATH="$PWD/dist/lib" ldd "$ext" 2>/dev/null | grep 'not found' || echo "  none"
-          else
-            echo "WARN: Python extension not found; skipping dep bundling." >&2
-          fi
-
           tar -czf "$package_name" -C dist .
           sha256sum "$package_name" > "${package_name}.sha256"
           echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
